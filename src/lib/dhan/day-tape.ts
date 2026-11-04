@@ -7,6 +7,7 @@ export type CloseBar = { t: number; c: number };
 export type DayFile = { date: string; expiry: string; legs: Record<string, CloseBar[]> };
 
 let file: DayFile = { date: "", expiry: "", legs: {} };
+let older: Record<string, CloseBar[]> = {};
 
 export function inCashSession(ts: number): boolean {
   const clock = istClock(new Date(ts));
@@ -47,6 +48,14 @@ export function prepareDay(expiry: string) {
 
 export function barsFor(id: string): CloseBar[] {
   return file.legs[id] ?? [];
+}
+
+export function olderBars(id: string): CloseBar[] {
+  return older[id] ?? [];
+}
+
+export function setOlder(legs: Record<string, CloseBar[]>) {
+  older = legs;
 }
 
 export function rememberLegs(expiry: string, legs: { id: string; bars: CloseBar[] }[]): boolean {

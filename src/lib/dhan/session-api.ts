@@ -128,12 +128,12 @@ export const saveNiftyTicks = createServerFn({ method: "POST" })
     const kinds = data.rows.map((row) => row.kind);
     const strikes = data.rows.map((row) => row.strike);
     const ltps = data.rows.map((row) => row.ltp);
-    await niftyQuery("delete from nifty_tick where day <> $1", [data.day]);
     await niftyQuery(
       `insert into nifty_tick (day, ts, security_id, kind, strike, ltp)
        select * from unnest($1::text[], $2::bigint[], $3::text[], $4::text[], $5::float8[], $6::float8[])`,
       [days, ts, ids, kinds, strikes, ltps],
     );
+    await keepTwoDays();
     return { ok: true as const, n: data.rows.length };
   });
 
@@ -148,7 +148,6 @@ export const saveNiftySession = createServerFn({ method: "POST" })
     const { niftyQuery } = await import("@/lib/nifty-db.server");
     const legs = JSON.stringify(data.legs);
     const book = JSON.stringify(data.book);
-    await niftyQuery("delete from nifty_session where day <> $1", [data.day]);
     await niftyQuery(
       `insert into nifty_session (day, expiry, legs, book)
        values ($1, $2, $3::jsonb, $4::jsonb)
@@ -156,7 +155,6 @@ export const saveNiftySession = createServerFn({ method: "POST" })
        set expiry = excluded.expiry, legs = excluded.legs, book = excluded.book, updated_at = now()`,
       [data.day, data.expiry, legs, book],
     );
-    await niftyQuery("delete from nifty_trade where day <> $1", [data.day]);
     if (data.book.trades.length) {
       const trades = data.book.trades;
       await niftyQuery(
@@ -194,5 +192,109 @@ export const saveNiftySession = createServerFn({ method: "POST" })
         ],
       );
     }
+    await keepTwoDays();
     return { ok: true as const };
+  });
+
+/** Today and the previous stored day stay. Older ticks go. Trades are never deleted. */
+export async function keepTwoDays(): Promise<void> {
+  const { niftyQuery } = await import("@/lib/nifty-db.server");
+  await niftyQuery(
+    `delete from nifty_tick where day not in (
+       select day from (select distinct day from nifty_tick order by day desc limit 2) kept
+     )`,
+  );
+  await niftyQuery(
+    `delete from nifty_session where day not in (
+       select day from (select distinct day from nifty_session order by day desc limit 2) kept
+     )`,
+  );
+}
+
+export const loadKeptMinutes = createServerFn({ method: "POST" })
+  .validator(() => ({}))
+  .handler(async () => {
+    try {
+      const { niftyQuery } = await import("@/lib/nifty-db.server");
+      const rows = await niftyQuery<{ security_id: string; t: number; c: number }>(
+        `select distinct on (security_id, (ts / 60000) * 60000)
+           security_id, (ts / 60000) * 60000 as t, ltp as c
+         from nifty_tick
+         where day in (select distinct day from nifty_tick order by day desc limit 2)
+         order by security_id, (ts / 60000) * 60000, ts desc`,
+      );
+      const legs: Record<string, { t: number; c: number }[]> = {};
+      for (const row of rows) {
+        const id = String(row.security_id);
+        const list = legs[id] ?? [];
+        list.push({ t: Number(row.t), c: Number(row.c) });
+        legs[id] = list;
+      }
+      return { legs };
+    } catch {
+      return { legs: {} as Record<string, { t: number; c: number }[]> };
+    }
+  });
+
+export type ChartMark = {
+  id: string;
+  kind: "CE" | "PE";
+  strike: number;
+  securityId: string;
+  entryTs: number;
+  exitTs?: number;
+  entry: number;
+  exit?: number;
+  mark: number;
+  status: "open" | "closed";
+  pnl: number | null;
+  lot: number;
+};
+
+export const loadExpiryMarks = createServerFn({ method: "POST" })
+  .validator((input: { expiry?: string }) => {
+    const expiry = String(input?.expiry ?? "").slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(expiry)) throw new Error("Bad expiry.");
+    return { expiry };
+  })
+  .handler(async ({ data }) => {
+    try {
+      const { niftyQuery } = await import("@/lib/nifty-db.server");
+      const rows = await niftyQuery<{
+        id: string;
+        kind: string;
+        strike: number;
+        security_id: string;
+        entry_ts: number;
+        exit_ts: number | null;
+        entry: number;
+        exit: number | null;
+        status: string;
+        pnl: number | null;
+        lot: number;
+      }>(
+        `select id, kind, strike, security_id, entry_ts, exit_ts, entry, exit, status, pnl, lot
+         from nifty_trade where expiry = $1 order by entry_ts`,
+        [data.expiry],
+      );
+      const marks: ChartMark[] = rows
+        .filter((row) => row.kind === "CE" || row.kind === "PE")
+        .map((row) => ({
+          id: String(row.id),
+          kind: row.kind as "CE" | "PE",
+          strike: Number(row.strike),
+          securityId: String(row.security_id),
+          entryTs: Number(row.entry_ts),
+          exitTs: row.exit_ts == null ? undefined : Number(row.exit_ts),
+          entry: Number(row.entry),
+          exit: row.exit == null ? undefined : Number(row.exit),
+          mark: Number(row.exit ?? row.entry),
+          status: row.status === "open" ? "open" : "closed",
+          pnl: row.pnl == null ? null : Number(row.pnl),
+          lot: Number(row.lot),
+        }));
+      return { marks };
+    } catch {
+      return { marks: [] as ChartMark[] };
+    }
   });

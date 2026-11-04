@@ -1,5 +1,8 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { LegView } from "@/lib/dhan/use-premium-engine";
+import { crossPnl, type CrossTrade } from "@/lib/dhan/cross-math";
+import { useCrossBook } from "@/lib/dhan/cross-book";
+import { loadExpiryMarks, type ChartMark } from "@/lib/dhan/session-api";
 
 const GAP_MS = 6 * 60 * 1000;
 const WINDOW_MS = 7 * 60 * 60 * 1000;
@@ -41,14 +44,19 @@ export function WaveChart({
   calls,
   puts,
   spot,
+  expiry,
 }: {
   future: LegView;
   calls: LegView[];
   puts: LegView[];
   spot: number;
+  expiry?: string;
 }) {
   const frame = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
+  const [picked, setPicked] = useState<string | null>(null);
+  const [stored, setStored] = useState<ChartMark[]>([]);
+  const liveTrades = useCrossBook((state) => state.trades);
   const [off, setOff] = useState<string[]>([]);
   const [view, setView] = useState<View | null>(null);
   const [fitted, setFitted] = useState(false);
@@ -117,6 +125,24 @@ export function WaveChart({
     };
   }, []);
 
+  useEffect(() => {
+    if (!expiry) return;
+    let stop = false;
+    const pull = () => {
+      void loadExpiryMarks({ data: { expiry } })
+        .then((result) => {
+          if (!stop) setStored(result.marks);
+        })
+        .catch(() => {});
+    };
+    pull();
+    const id = window.setInterval(pull, 15000);
+    return () => {
+      stop = true;
+      window.clearInterval(id);
+    };
+  }, [expiry]);
+
   const hidden = new Set(off);
   const stamp = [future, ...calls, ...puts].map(barStamp).join(";");
   const atm = nearestStrike(calls, spot);
@@ -131,6 +157,9 @@ export function WaveChart({
     const nudged = nudgeLive(base, future, calls, puts);
     return nudged ?? layout(size.w, size.h, future, calls, puts, spot, hidden, view, fitted, !moving);
   }, [base, liveKey]);
+  const tradeMarks = useMemo(() => (drawn ? placeTrades(drawn, liveTrades, stored) : []), [drawn, liveTrades, stored]);
+  const markRef = useRef(tradeMarks);
+  markRef.current = tradeMarks;
   if (drawn) {
     space.current = {
       plotL: drawn.plotL,
@@ -282,6 +311,11 @@ export function WaveChart({
     if (!active || active.mode !== "pan" || pointers.current.size > 0) return;
     const moved = Math.hypot(point.x - active.x, point.y - active.y);
     if (moved > 8) return;
+    const hit = markRef.current.find((mark) => Math.hypot(mark.x2 - point.x, mark.y2 - point.y) < 18 || Math.hypot(mark.x1 - point.x, mark.y1 - point.y) < 18);
+    if (hit) {
+      setPicked(hit.id);
+      return;
+    }
     const now = Date.now();
     const prev = tap.current;
     if (prev && now - prev.t < 320 && Math.hypot(point.x - prev.x, point.y - prev.y) < 28) {
@@ -407,6 +441,13 @@ export function WaveChart({
                   />
                 )),
               )}
+              {tradeMarks.map((mark) => (
+                <g key={mark.id}>
+                  <line x1={mark.x1} y1={mark.y1} x2={mark.x2} y2={mark.y2} stroke={mark.color} strokeWidth="2.5" />
+                  <circle cx={mark.x1} cy={mark.y1} r="5" fill={mark.color} />
+                  <circle cx={mark.x2} cy={mark.y2} r="5" fill={mark.open ? "none" : mark.color} stroke={mark.color} strokeWidth="2" />
+                </g>
+              ))}
               {drawn.crosses.map((cross, index) => (
                 <circle
                   key={`${index}-${cross.t}-${cross.a}`}
@@ -445,9 +486,97 @@ export function WaveChart({
             ))}
           </svg>
         ) : null}
+        {picked ? <TradeCard mark={tradeMarks.find((mark) => mark.id === picked) ?? null} onClose={() => setPicked(null)} /> : null}
       </div>
     </div>
   );
+}
+
+function TradeCard({ mark, onClose }: { mark: TradeMark | null; onClose: () => void }) {
+  if (!mark) return null;
+  return (
+    <div className="absolute left-3 top-3 z-10 max-w-[16rem] rounded-2xl border border-border bg-surface px-3 py-2 text-xs text-fg">
+      <div className="flex items-center justify-between gap-3">
+        <span>{mark.title}</span>
+        <button type="button" onClick={onClose} className="text-subtle">
+          Close
+        </button>
+      </div>
+      <p className="mt-1 text-muted">
+        {mark.entryLabel}
+        <br />
+        {mark.exitLabel}
+      </p>
+      <p className={mark.pnl >= 0 ? "mt-1 text-up" : "mt-1 text-down"}>{mark.pnlLabel}</p>
+    </div>
+  );
+}
+
+type TradeMark = {
+  id: string;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  color: string;
+  open: boolean;
+  title: string;
+  entryLabel: string;
+  exitLabel: string;
+  pnl: number;
+  pnlLabel: string;
+};
+
+function placeTrades(
+  drawn: NonNullable<ReturnType<typeof layout>>,
+  live: CrossTrade[],
+  stored: ChartMark[],
+): TradeMark[] {
+  const byId = new Map<string, ChartMark>();
+  for (const row of stored) byId.set(row.id, row);
+  for (const trade of live) {
+    byId.set(trade.id, {
+      id: trade.id,
+      kind: trade.buy.type,
+      strike: trade.buy.strike,
+      securityId: trade.buy.securityId,
+      entryTs: trade.entryTs,
+      exitTs: trade.exitTs,
+      entry: trade.buy.entry,
+      exit: trade.buy.exit,
+      mark: trade.buy.mark,
+      status: trade.status,
+      pnl: trade.status === "closed" ? crossPnl(trade, trade.buy.exit ?? trade.buy.entry, true) : crossPnl(trade, trade.buy.mark, false),
+      lot: trade.lot,
+    });
+  }
+  const plotW = Math.max(1, drawn.plotR - drawn.plotL);
+  const plotH = Math.max(1, drawn.plotB - drawn.plotT);
+  const xOf = (t: number) => drawn.plotL + ((t - drawn.frame.t0) / (drawn.frame.t1 - drawn.frame.t0 || 1)) * plotW;
+  const yOf = (price: number) => drawn.plotT + (1 - (price - drawn.frame.y0) / (drawn.frame.y1 - drawn.frame.y0 || 1)) * plotH;
+  const marks: TradeMark[] = [];
+  for (const row of byId.values()) {
+    const endTs = row.status === "open" ? drawn.frame.t1 : row.exitTs;
+    const endPx = row.status === "open" ? row.mark : row.exit;
+    if (!endTs || !(endPx && endPx > 0)) continue;
+    if (endTs < drawn.frame.t0 || row.entryTs > drawn.frame.t1) continue;
+    const pnl = row.pnl ?? 0;
+    marks.push({
+      id: row.id,
+      x1: xOf(row.entryTs),
+      y1: yOf(row.entry),
+      x2: xOf(endTs),
+      y2: yOf(endPx),
+      color: row.kind === "PE" ? "var(--color-down)" : "var(--color-up)",
+      open: row.status === "open",
+      title: `${formatStrike(row.strike)} ${row.kind}`,
+      entryLabel: `${clock(row.entryTs, true)} buy ${row.entry.toFixed(2)}`,
+      exitLabel: row.status === "open" ? `now ${endPx.toFixed(2)}` : `${clock(endTs, true)} exit ${endPx.toFixed(2)}`,
+      pnl,
+      pnlLabel: `${pnl >= 0 ? "+" : ""}${Math.round(pnl)} after brokerage`,
+    });
+  }
+  return marks;
 }
 
 function ToggleChip({ label, kind, on, onClick }: { label: string; kind: Kind; on: boolean; onClick: () => void }) {

@@ -71,7 +71,7 @@ export function PremiumDesk() {
       <div className="mt-4 grid items-start gap-3 lg:grid-cols-[minmax(0,1fr)_300px]">
         <div className="rounded-xl bg-surface p-3 shadow-[var(--shadow-border)] sm:p-4">
           {chartOn && engine.future && calls.length > 0 && puts.length > 0 ? (
-            <WaveChart future={engine.future} calls={calls} puts={puts} spot={engine.spot} />
+            <WaveChart future={engine.future} calls={calls} puts={puts} spot={engine.spot} expiry={engine.book?.expiry} />
           ) : (
             <Skeleton className="h-[28rem] rounded-xl sm:h-[32rem]" />
           )}

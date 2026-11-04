@@ -4,12 +4,12 @@ import { create } from "zustand";
 import { useJournal, type PremiumTrade } from "./journal";
 import { useR2 } from "./r2-session";
 import { saveTape } from "./tape-db";
-import { archiveTicks, getNiftyBook, getOptionMinutes } from "./server";
+import { archiveTicks, getDeskState, getNiftyBook, getOptionMinutes } from "./server";
 import { useDhanCreds, useDhanSession } from "./session";
 import { parseFeed, type FeedTick } from "./ticks";
 import type { NiftyBook, OptContract } from "./nifty";
-import { openSession, syncCrossBook, touchOpenMarks, useCrossBook } from "./cross-book";
-import { barsFor, inCashSession, prepareDay } from "./day-tape";
+import { applyServerBook, openSession, setServerOwns, syncCrossBook, touchOpenMarks, useCrossBook } from "./cross-book";
+import { barsFor, inCashSession, olderBars, prepareDay } from "./day-tape";
 import { saveNiftyTicks } from "./session-api";
 import { istDateKey } from "@/lib/market/hours";
 import {
@@ -136,6 +136,26 @@ export function usePremiumEngine(): EngineView {
   const closeTrade = useJournal((s) => s.close);
   const legs = useRef<Map<string, LegRuntime>>(new Map());
   const spotRef = useRef(0);
+
+  useEffect(() => {
+    let stop = false;
+    const pull = async () => {
+      try {
+        const desk = await getDeskState({ data: {} });
+        if (stop) return;
+        setServerOwns(desk.owns);
+        if (desk.owns) applyServerBook(desk.book);
+      } catch {
+        if (!stop) setServerOwns(false);
+      }
+    };
+    void pull();
+    const id = window.setInterval(pull, 4000);
+    return () => {
+      stop = true;
+      window.clearInterval(id);
+    };
+  }, []);
 
   const bookQuery = useQuery({
     queryKey: ["nifty-book", creds?.clientId],
@@ -554,6 +574,10 @@ function withSaved(id: string, bars: Bar5[]): Bar5[] {
     if (bar.c > 0 && inCashSession(bar.t)) map.set(bar.t, bar);
   }
   for (const row of barsFor(id)) {
+    if (map.has(row.t) || !(row.c > 0) || !inCashSession(row.t)) continue;
+    map.set(row.t, { t: row.t, o: row.c, h: row.c, l: row.c, c: row.c, bid: 0, ask: 0 });
+  }
+  for (const row of olderBars(id)) {
     if (map.has(row.t) || !(row.c > 0) || !inCashSession(row.t)) continue;
     map.set(row.t, { t: row.t, o: row.c, h: row.c, l: row.c, c: row.c, bid: 0, ask: 0 });
   }

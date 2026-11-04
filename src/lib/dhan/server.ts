@@ -14,6 +14,14 @@ function creds(input: { clientId?: string; accessToken?: string }): DhanCreds {
   return { clientId, accessToken };
 }
 
+export const getDeskState = createServerFn({ method: "POST" })
+  .validator(() => ({}))
+  .handler(async () => {
+    const { startDesk, deskSnapshot } = await import("./watcher.server");
+    startDesk();
+    return deskSnapshot();
+  });
+
 export const connectDhan = createServerFn({ method: "POST" })
   .validator((input: { clientId: string; accessToken: string }) => creds(input))
   .handler(async ({ data }) => {
