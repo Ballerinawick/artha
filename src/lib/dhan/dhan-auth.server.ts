@@ -1,4 +1,4 @@
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 
 export type DhanEnv = {
   clientId: string;
@@ -7,6 +7,11 @@ export type DhanEnv = {
   pin: string;
   totpSecret: string;
 };
+
+type CachedToken = { fingerprint: string; token: string; expiresAt: number };
+
+let cachedToken: CachedToken | null = null;
+let pendingToken: { fingerprint: string; promise: Promise<string> } | null = null;
 
 /** Present only when the machine has its own Dhan login. Nothing here is read from the page. */
 export function readDhanEnv(): DhanEnv | null {
@@ -33,6 +38,29 @@ export function totpCode(secret: string, now = Date.now()): string {
 }
 
 export async function mintAccessToken(env: DhanEnv): Promise<string> {
+  const fingerprint = createHash("sha256")
+    .update([env.clientId, env.apiKey, env.apiSecret, env.pin, env.totpSecret].join("\0"))
+    .digest("hex");
+  if (cachedToken?.fingerprint === fingerprint && cachedToken.expiresAt > Date.now()) {
+    return cachedToken.token;
+  }
+  if (pendingToken?.fingerprint === fingerprint) return pendingToken.promise;
+
+  const promise = requestAccessToken(env)
+    .then((token) => {
+      if (pendingToken?.promise === promise) {
+        cachedToken = { fingerprint, token, expiresAt: tokenExpiry(token) };
+      }
+      return token;
+    })
+    .finally(() => {
+      if (pendingToken?.promise === promise) pendingToken = null;
+    });
+  pendingToken = { fingerprint, promise };
+  return promise;
+}
+
+async function requestAccessToken(env: DhanEnv): Promise<string> {
   const url = `https://auth.dhan.co/app/generateAccessToken?dhanClientId=${encodeURIComponent(env.clientId)}&pin=${encodeURIComponent(env.pin)}`;
   const response = await fetch(url, {
     method: "POST",
@@ -53,6 +81,19 @@ export async function mintAccessToken(env: DhanEnv): Promise<string> {
   }
   if (token.length < 20) throw new Error("Dhan login did not return a token.");
   return token;
+}
+
+function tokenExpiry(token: string): number {
+  const payload = token.split(".")[1];
+  if (payload) {
+    try {
+      const body = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { exp?: number };
+      if (typeof body.exp === "number") return body.exp * 1000 - 60_000;
+    } catch {
+      /* not a JWT */
+    }
+  }
+  return Date.now() + 23 * 60 * 60 * 1000;
 }
 
 function base32(input: string): Buffer {
