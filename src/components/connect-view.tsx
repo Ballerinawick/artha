@@ -1,7 +1,6 @@
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { connectDhan } from "@/lib/dhan/server";
 import { useDhanCreds, useDhanSession } from "@/lib/dhan/session";
 import { marketSession } from "@/lib/market/hours";
@@ -14,14 +13,9 @@ const GATES = [
 ];
 
 export function ConnectView() {
-  const clientSaved = useDhanSession((s) => s.clientId);
-  const tokenExp = useDhanSession((s) => s.tokenExp);
   const setCreds = useDhanSession((s) => s.setCreds);
   const creds = useDhanCreds();
   const navigate = useNavigate();
-  const [clientId, setClientId] = useState("");
-  const [accessToken, setAccessToken] = useState("");
-  const [editId, setEditId] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [clock, setClock] = useState("");
@@ -34,11 +28,6 @@ export function ConnectView() {
     if (useDhanSession.persist.hasHydrated()) done();
     return useDhanSession.persist.onFinishHydration(done);
   }, []);
-
-  useEffect(() => {
-    if (!ready || !clientSaved || editId) return;
-    setClientId(clientSaved);
-  }, [ready, clientSaved, editId]);
 
   useEffect(() => {
     if (ready && creds) void navigate({ to: "/signals" });
@@ -71,9 +60,8 @@ export function ConnectView() {
     setBusy(true);
     setError("");
     try {
-      const id = (clientSaved && !editId ? clientSaved : clientId).trim();
-      const res = await connectDhan({ data: { clientId: id, accessToken } });
-      setCreds(res.clientId, accessToken.trim());
+      const res = await connectDhan({ data: {} });
+      setCreds(res.clientId, res.accessToken);
       await navigate({ to: "/signals" });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not reach Dhan.");
@@ -104,8 +92,8 @@ export function ConnectView() {
       <section className="rounded-xl bg-surface p-5 shadow-[var(--shadow-border)]">
         <h2 className="font-display text-3xl tracking-tight">Arm the desk</h2>
         <p className="mt-2 text-sm text-muted">
-          The client id stays on this phone. The access token lasts about a day, so Artha asks for it again only after it
-          expires. Nothing is sent to the exchange.
+          Artha connects with the Dhan API credentials configured for this app. Your API secret, PIN, and TOTP secret
+          stay on the server; a fresh access token is created automatically.
         </p>
         <form
           className="mt-6 space-y-3"
@@ -114,46 +102,9 @@ export function ConnectView() {
             void start();
           }}
         >
-          {clientSaved && !editId ? (
-            <p className="text-sm text-muted">
-              Client id {clientSaved}{" "}
-              <button type="button" className="underline" onClick={() => setEditId(true)}>
-                Change
-              </button>
-            </p>
-          ) : (
-            <>
-              <label className="block text-xs text-muted" htmlFor="client-id">
-                Client id
-              </label>
-              <Input
-                id="client-id"
-                inputMode="numeric"
-                autoComplete="off"
-                value={clientId}
-                onChange={(e) => setClientId(e.target.value)}
-                placeholder="1000000001"
-              />
-            </>
-          )}
-          <label className="block text-xs text-muted" htmlFor="access-token">
-            {tokenExp > 0 && tokenExp <= Date.now() ? "Access token expired" : "Access token"}
-          </label>
-          <Input
-            id="access-token"
-            type="password"
-            autoComplete="off"
-            value={accessToken}
-            onChange={(e) => setAccessToken(e.target.value)}
-            placeholder="My Profile → Access DhanHQ APIs"
-          />
           {error ? <p className="text-sm text-down">{error}</p> : null}
-          <Button
-            type="submit"
-            className="w-full"
-            disabled={busy || !(clientSaved && !editId ? clientSaved : clientId).trim() || !accessToken.trim()}
-          >
-            {busy ? "Checking Dhan…" : "Start"}
+          <Button type="submit" className="w-full" disabled={busy}>
+            {busy ? "Connecting to Dhan…" : "Connect Dhan"}
           </Button>
         </form>
         <p className="mt-5 text-xs leading-relaxed text-subtle">
