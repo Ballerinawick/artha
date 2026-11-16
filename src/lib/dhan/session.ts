@@ -35,7 +35,7 @@ export const useDhanSession = create<Session>()(
       clear: () => set({ clientId: "", accessToken: "", tokenExp: 0 }),
     }),
     {
-      name: "artha-dhan",
+      name: "artha-dhan-api-key",
       storage: createJSONStorage(() => localStorage),
     },
   ),

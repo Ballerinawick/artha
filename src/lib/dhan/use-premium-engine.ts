@@ -178,7 +178,7 @@ export function usePremiumEngine(): EngineView {
       stopTape?.();
       stopTape = null;
       tapeKey = "";
-      patch({ status: "idle", note: "Paste the Dhan login to open the Nifty feed." });
+      patch({ status: "idle", note: "Connect to Dhan to open the Nifty feed." });
       return;
     }
     if (bookQuery.isLoading) {

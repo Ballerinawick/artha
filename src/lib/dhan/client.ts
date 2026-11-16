@@ -16,7 +16,7 @@ function cleanMessage(status: number, body: string): string {
   } catch {
     /* plain text */
   }
-  if (status === 401 || status === 403) return "Dhan refused this client id or access token.";
+  if (status === 401 || status === 403) return "Dhan refused the configured client id or generated access token.";
   if (status === 429) return "Dhan is limiting requests. The chain will be tried again in a few seconds.";
   return `Dhan returned ${status}.`;
 }

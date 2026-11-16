@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { buildDesk, buildSignalBoard, fetchTape, sendOrder } from "./board";
 import { dhan } from "./client";
+import { mintAccessToken, readDhanEnv } from "./dhan-auth.server";
 import { loadAltBook, loadAltMinutes } from "./alt-load";
 import { loadNiftyBook, loadOptionMinutes } from "./nifty";
 import { putR2 } from "./r2";
@@ -23,10 +24,17 @@ export const getDeskState = createServerFn({ method: "POST" })
   });
 
 export const connectDhan = createServerFn({ method: "POST" })
-  .validator((input: { clientId: string; accessToken: string }) => creds(input))
-  .handler(async ({ data }) => {
-    await dhan(data, "/fundlimit");
-    return { ok: true as const, clientId: data.clientId };
+  .validator(() => ({}))
+  .handler(async () => {
+    const env = readDhanEnv();
+    if (!env) {
+      throw new Error(
+        "Dhan API-key login is not configured. Set DHAN_CLIENT_ID, DHAN_API_KEY, DHAN_API_SECRET, DHAN_PIN, and DHAN_TOTP_SECRET on the server.",
+      );
+    }
+    const accessToken = await mintAccessToken(env);
+    await dhan({ clientId: env.clientId, accessToken }, "/fundlimit");
+    return { ok: true as const, clientId: env.clientId, accessToken };
   });
 
 export const archiveTicks = createServerFn({ method: "POST" })
