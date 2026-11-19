@@ -220,6 +220,34 @@ test("nothing new opens after 15:20, and 15:29 flattens what is open", () => {
   assert.equal(open.trades[0]?.exitTs, at(360));
 });
 
+test("a desk cut flats at 15:20 without moving the cash-session default", () => {
+  const cut = { lastEntry: 15 * 60 + 20, flat: 15 * 60 + 20 };
+  const book = reduceAtm(
+    EMPTY_BOOK,
+    [
+      leg("c", "CE", 23000, [
+        [at(0), 10],
+        [at(1), 6],
+        [at(365), 5],
+      ]),
+      leg("p", "PE", 23000, [
+        [at(0), 6],
+        [at(1), 10],
+        [at(365), 11],
+      ]),
+    ],
+    65,
+    "2026-10-27",
+    23000,
+    at(370),
+    cut,
+  );
+  assert.equal(book.trades.filter((trade) => trade.status === "open").length, 0);
+  assert.equal(book.trades[0]?.status, "closed");
+  assert.equal(book.trades[0]?.exitWhy, "flat");
+  assert.equal(book.trades[0]?.exitTs, at(365));
+});
+
 test("one lot profit is the premium move times 65, then sixty off", () => {
   const trade = { lots: 1, lot: 65, buy: { entry: 100, mark: 110 } } as CrossTrade;
   assert.equal(crossPnl(trade, 110, false), 650);

@@ -429,13 +429,15 @@ export async function sendOrder(
     side: "BUY" | "SELL";
     qty: number;
     symbol: string;
+    correlationId?: string;
   },
 ) {
+  const correlationId = (order.correlationId && order.correlationId.length >= 8 ? order.correlationId : `artha${Date.now()}`).slice(0, 20);
   const res = await dhan<{ orderId?: string; data?: { orderId?: string } }>(creds, "/orders", {
     method: "POST",
     body: {
       dhanClientId: creds.clientId,
-      correlationId: `artha${Date.now()}`.slice(0, 20),
+      correlationId,
       transactionType: order.side,
       exchangeSegment: order.segment,
       productType: "INTRADAY",

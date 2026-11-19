@@ -8,7 +8,8 @@ import { archiveTicks, getDeskState, getNiftyBook, getOptionMinutes } from "./se
 import { useDhanCreds, useDhanSession } from "./session";
 import { parseFeed, type FeedTick } from "./ticks";
 import type { NiftyBook, OptContract } from "./nifty";
-import { applyServerBook, openSession, setServerOwns, syncCrossBook, touchOpenMarks, useCrossBook } from "./cross-book";
+import { applyServerAlt } from "./alt-tape";
+import { applyServerBook, openSession, setServerOwns, syncCrossBook, touchOpenMarks, useCrossBook, useDeskMirror } from "./cross-book";
 import { barsFor, inCashSession, olderBars, prepareDay } from "./day-tape";
 import { saveNiftyTicks } from "./session-api";
 import { istDateKey } from "@/lib/market/hours";
@@ -144,13 +145,17 @@ export function usePremiumEngine(): EngineView {
         const desk = await getDeskState({ data: {} });
         if (stop) return;
         setServerOwns(desk.owns);
-        if (desk.owns) applyServerBook(desk.book);
+        useDeskMirror.setState({ phase: desk.phase, note: desk.note, live: desk.live, orders: desk.orders });
+        if (desk.owns) {
+          applyServerBook(desk.book);
+          applyServerAlt("BANKNIFTY", desk.bank, desk.bankExpiry);
+        }
       } catch {
         if (!stop) setServerOwns(false);
       }
     };
     void pull();
-    const id = window.setInterval(pull, 4000);
+    const id = window.setInterval(pull, 1000);
     return () => {
       stop = true;
       window.clearInterval(id);

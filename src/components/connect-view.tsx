@@ -76,7 +76,7 @@ export function ConnectView() {
         <p className="text-xs font-medium text-muted">{clock ? `${clock} · ${phase}` : "NSE cash session"}</p>
         <h1 className="mt-3 font-display text-5xl tracking-tight sm:text-6xl">Artha</h1>
         <p className="mt-4 max-w-md text-sm leading-relaxed text-muted">
-          The live Nifty call and put. Ticks build one-minute bars. A paper opens only when that swing is large enough to pay the ₹40 round trip and the spread, then it is held for the target. Real orders are not sent.
+          The live Nifty call and put. Ticks build one-minute bars. A paper opens only when that swing is large enough to pay the ₹40 round trip and the spread, then it is held for the target. This phone does not send orders.
         </p>
         <ol className="mt-8 grid grid-cols-2 gap-3">
           {GATES.map((gate) => (

@@ -1,7 +1,7 @@
 /** ATM only. Buy the rising leg at the circle, one lot, on the 1-minute bar.
  *  Hold while that leg stays ahead. A ₹5 lead that gives back ₹2 closes at the high.
  *  If the other leg is ahead by ₹2 on a later minute, the idea is dead: get out, do not switch.
- *  Flat by 15:29. */
+ *  Default flat is 15:29. The Lightsail desk passes its own cut; the circle rules do not change. */
 
 import { istClock } from "../market/hours.ts";
 import { inCashSession } from "./day-tape.ts";
@@ -10,8 +10,12 @@ export const CROSS_BROKERAGE = 60;
 const GAP_MS = 6 * 60 * 1000;
 const MINUTE = 60_000;
 const OPEN = 9 * 60 + 15;
-const LAST_ENTRY = 15 * 60 + 20;
-const FLAT = 15 * 60 + 29;
+const CASH_LAST = 15 * 60 + 20;
+const CASH_FLAT = 15 * 60 + 29;
+
+export type SessionCut = { lastEntry: number; flat: number };
+
+export const CASH_CUT: SessionCut = { lastEntry: CASH_LAST, flat: CASH_FLAT };
 /** Our lead must open by at least this much before a turn is a real high. */
 const REAL_EXPAND = 5;
 /** Our lead must fall at least this far from that high before the buy is closed. */
@@ -103,6 +107,7 @@ export function reduceAtm(
   expiry: string,
   anchor: number,
   now = Date.now(),
+  cut: SessionCut = CASH_CUT,
 ): BookSnap {
   const seen = new Set(book.seen);
   let trades = book.trades;
@@ -133,7 +138,7 @@ export function reduceAtm(
     if (open) continue;
     seen.add(hit.id);
     changed = true;
-    if (!canEnter(hit.t) || hit.t < latestTs(trades)) continue;
+    if (!canEnter(hit.t, cut) || hit.t < latestTs(trades)) continue;
     const opened = openFrom(hit, lot, expiry);
     if (!opened) continue;
     total += 1;
@@ -145,8 +150,8 @@ export function reduceAtm(
     const path = quotesOf(open, legs, now);
     const turn = turnOf(open, path, Number.POSITIVE_INFINITY);
     if (turn) closeOpen(turn.at, turn.why);
-    else if (mustFlat(now)) {
-      const last = [...path].reverse().find((point) => istClock(new Date(point.t)).minutes <= FLAT);
+    else if (mustFlat(now, cut)) {
+      const last = [...path].reverse().find((point) => istClock(new Date(point.t)).minutes <= cut.flat);
       if (last) closeOpen(last, "flat");
     }
   }
@@ -253,16 +258,16 @@ function turnOf(trade: CrossTrade, path: Quote[], until: number): { at: Quote; w
   return null;
 }
 
-function canEnter(ts: number): boolean {
+function canEnter(ts: number, cut: SessionCut): boolean {
   const clock = istClock(new Date(ts));
   if (clock.weekday === 0 || clock.weekday === 6) return false;
-  return clock.minutes >= OPEN && clock.minutes < LAST_ENTRY;
+  return clock.minutes >= OPEN && clock.minutes < cut.lastEntry;
 }
 
-function mustFlat(now: number): boolean {
+function mustFlat(now: number, cut: SessionCut): boolean {
   const clock = istClock(new Date(now));
   if (clock.weekday === 0 || clock.weekday === 6) return true;
-  return clock.minutes >= FLAT;
+  return clock.minutes >= cut.flat;
 }
 
 function align(ce: Point[], pe: Point[]): Quote[] {

@@ -1,5 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
-import { buildDesk, buildSignalBoard, fetchTape, sendOrder } from "./board";
+import { buildDesk, buildSignalBoard, fetchTape } from "./board";
 import { dhan } from "./client";
 import { mintAccessToken, readDhanEnv } from "./dhan-auth.server";
 import { loadAltBook, loadAltMinutes } from "./alt-load";
@@ -132,7 +132,6 @@ export const placeDhanOrder = createServerFn({ method: "POST" })
       return { ...c, securityId: String(input.securityId), segment: input.segment, side: input.side, qty, symbol: String(input.symbol) };
     },
   )
-  .handler(async ({ data }) => {
-    const { clientId, accessToken, ...order } = data;
-    return sendOrder({ clientId, accessToken }, order);
+  .handler(async () => {
+    throw new Error("This phone cannot send an order. Lightsail sends the market order when the paper opens or closes.");
   });

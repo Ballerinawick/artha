@@ -1,14 +1,14 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Navigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { DeskShell } from "@/components/desk-shell";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { getDeskBook, placeDhanOrder } from "@/lib/dhan/server";
+import { getDeskBook } from "@/lib/dhan/server";
 import { useDhanCreds } from "@/lib/dhan/session";
 import { useLiveTape } from "@/lib/dhan/use-tape";
 import { formatInr } from "@/lib/market/hours";
-import { paperPnl, usePaper, type PaperTrade } from "@/lib/paper";
+import { paperPnl, usePaper } from "@/lib/paper";
 
 export function DeskView() {
   const [ready, setReady] = useState(false);
@@ -23,28 +23,12 @@ export function DeskView() {
   useLiveTape(fnoKey);
   const setQty = usePaper((s) => s.setQty);
   const square = usePaper((s) => s.square);
-  const sent = usePaper((s) => s.sent);
 
   const query = useQuery({
     queryKey: ["desk", creds?.clientId],
     enabled: ready && !!creds,
     queryFn: () => getDeskBook({ data: creds! }),
     refetchInterval: 30_000,
-  });
-
-  const live = useMutation({
-    mutationFn: (trade: PaperTrade) =>
-      placeDhanOrder({
-        data: {
-          ...creds!,
-          securityId: trade.securityId,
-          segment: trade.segment === "NSE_FNO" ? "NSE_FNO" : "NSE_EQ",
-          side: trade.side,
-          qty: trade.qty,
-          symbol: trade.symbol,
-        },
-      }),
-    onSuccess: (res, trade) => sent(trade.id, res.orderId),
   });
 
   if (!ready) {
@@ -65,7 +49,7 @@ export function DeskView() {
       <h1 className="mt-1 font-display text-4xl tracking-tight">Funds and positions</h1>
       <p className="mt-2 max-w-xl text-sm text-muted">
         Live Dhan funds and positions. Option papers are on Signals. The stock rows below are an old blotter, not the
-        Nifty book. Send live is still a real market order.
+        Nifty book. This phone cannot send an order.
       </p>
       {book ? <p className="mt-1 text-xs text-subtle">As of {book.asOfLabel}</p> : null}
       {query.isError ? (
@@ -156,23 +140,10 @@ export function DeskView() {
                   <Button variant="secondary" onClick={() => square(t.id)}>
                     Square paper
                   </Button>
-                  <Button
-                    disabled={live.isPending}
-                    onClick={() => {
-                      const ok = window.confirm(
-                        `Send ${t.side} ${t.qty} ${t.symbol} as a market intraday order on Dhan? There is no stop.`,
-                      );
-                      if (ok) live.mutate(t);
-                    }}
-                  >
-                    Send live
-                  </Button>
+                  <p className="text-xs text-muted">Lightsail sends the market order with this paper. This phone cannot.</p>
                 </div>
               ) : null}
               {t.orderId ? <p className="mt-2 text-xs text-muted">Dhan order {t.orderId}</p> : null}
-              {live.isError && live.variables?.id === t.id ? (
-                <p className="mt-2 text-xs text-down">{live.error instanceof Error ? live.error.message : "Order failed"}</p>
-              ) : null}
             </article>
           ))}
         </div>

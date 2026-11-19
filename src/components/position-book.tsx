@@ -2,7 +2,7 @@ import { Navigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { DeskShell } from "@/components/desk-shell";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useCrossBook } from "@/lib/dhan/cross-book";
+import { useCrossBook, useDeskMirror } from "@/lib/dhan/cross-book";
 import { CROSS_BROKERAGE, crossPnl, type CrossTrade } from "@/lib/dhan/cross-math";
 import { useAltTape } from "@/lib/dhan/alt-tape";
 import { useDhanCreds } from "@/lib/dhan/session";
@@ -20,6 +20,7 @@ export function PositionBook() {
   const closedPnl = useCrossBook((s) => s.closedPnl);
   const altPapers = useAltTape((s) => s.papers);
   const altMarks = useAltTape((s) => s.marks);
+  const mirror = useDeskMirror();
 
   if (!ready) {
     return (
@@ -48,7 +49,7 @@ export function PositionBook() {
         <p className="text-xs font-medium text-muted">Cross papers</p>
         <h1 className="font-display text-3xl tracking-tight">Position</h1>
         <p className="mt-1 text-sm text-muted">
-          1-minute ATM only. Buy the rising leg at the circle, one lot. No sell. If that leg gets ₹5 ahead and turns, it closes at the high. If the other leg is ₹2 ahead on a later minute, it closes there and does not switch. The next buy waits for a new circle. The live tick only moves the current minute and the open mark. Flat by 15:29. {formatInr(CROSS_BROKERAGE, 0)} comes off when it closes. {niftyWeekday()}. Today's ticks and closed papers are kept in the database from 09:15 to 15:30. A refresh draws that past. Tomorrow starts empty.
+          1-minute ATM only. Buy the rising leg at the circle, one lot. No sell. The phone only mirrors Lightsail. Live market orders start at 09:15. An open buy is squared at 15:20 and nothing new is sent after that. The process sleeps at 15:30. {formatInr(CROSS_BROKERAGE, 0)} comes off when it closes. {niftyWeekday()}. {mirror.note || "Waiting for the Lightsail desk."}
         </p>
       </div>
       <LiveStrip engine={engine} />
@@ -69,7 +70,15 @@ export function PositionBook() {
         {open.length === 0 ? <p className="mt-3 text-sm text-muted">No open buy.</p> : null}
         <ul className="mt-2 divide-y divide-border">
           {open.map(({ symbol, trade, px }) => (
-            <Row key={`${symbol}-${trade.id}`} symbol={symbol} trade={trade} px={px} pnl={crossPnl(trade, px, false)} />
+            <Row
+              key={`${symbol}-${trade.id}`}
+              symbol={symbol}
+              trade={trade}
+              px={px}
+              pnl={crossPnl(trade, px, false)}
+              orderId={mirror.orders[trade.id]?.buyOrderId}
+              orderError={mirror.orders[trade.id]?.error}
+            />
           ))}
         </ul>
       </section>
@@ -80,7 +89,14 @@ export function PositionBook() {
         {closed.length === 0 ? <p className="mt-3 text-sm text-muted">No closed buy yet.</p> : null}
         <ul className="mt-2 divide-y divide-border">
           {closed.map(({ symbol, trade }) => (
-            <Row key={`${symbol}-${trade.id}`} symbol={symbol} trade={trade} pnl={crossPnl(trade, trade.buy.exit ?? trade.buy.entry, true)} />
+            <Row
+              key={`${symbol}-${trade.id}`}
+              symbol={symbol}
+              trade={trade}
+              pnl={crossPnl(trade, trade.buy.exit ?? trade.buy.entry, true)}
+              orderId={mirror.orders[trade.id]?.sellOrderId ?? mirror.orders[trade.id]?.buyOrderId}
+              orderError={mirror.orders[trade.id]?.error}
+            />
           ))}
         </ul>
       </section>
@@ -127,7 +143,21 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: num
   );
 }
 
-function Row({ symbol, trade, pnl, px }: { symbol: string; trade: CrossTrade; pnl: number; px?: number }) {
+function Row({
+  symbol,
+  trade,
+  pnl,
+  px,
+  orderId,
+  orderError,
+}: {
+  symbol: string;
+  trade: CrossTrade;
+  pnl: number;
+  px?: number;
+  orderId?: string;
+  orderError?: string;
+}) {
   const mark = px ?? trade.buy.exit ?? trade.buy.entry;
   return (
     <li className="flex items-start justify-between gap-3 py-3">
@@ -137,7 +167,9 @@ function Row({ symbol, trade, pnl, px }: { symbol: string; trade: CrossTrade; pn
           {clock(trade.entryTs)}
           {trade.exitTs ? ` – ${clock(trade.exitTs)}` : ""} · 1 × {trade.lot} · {trade.frame} · {trade.reason}
           {trade.exitWhy ? ` · ${exitLabel(trade.exitWhy)}` : ""}
+          {orderId ? ` · Dhan ${orderId}` : ""}
         </p>
+        {orderError ? <p className="mt-1 text-xs text-down">{orderError}</p> : null}
       </div>
       <p className={pnl >= 0 ? "text-sm tabular-nums text-up" : "text-sm tabular-nums text-down"}>{formatInr(pnl, 0)}</p>
     </li>
@@ -156,7 +188,7 @@ function LegLine({ symbol, leg, live }: { symbol: string; leg: CrossTrade["buy"]
 
 function exitLabel(why: CrossTrade["exitWhy"]): string {
   if (why === "flipped") return "other side took the lead";
-  if (why === "flat") return "flat 15:29";
+  if (why === "flat") return "flat 15:20";
   return "gap turned";
 }
 
