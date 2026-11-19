@@ -8,7 +8,7 @@ import { sendOrder } from "./board";
 import { dhan, DhanError } from "./client";
 import { crossPnl, EMPTY_BOOK, markTrades, reduceAtm, type BookSnap, type CrossTrade, type WaveLeg } from "./cross-math";
 import { mintAccessToken, readDhanEnv, type DhanEnv } from "./dhan-auth.server";
-import { intentIsFresh, liveOrdersEnabled, orderIntents, orderTag, type OrderIntent } from "./live-sync";
+import { gateOrder, intentIsFresh, liveOrdersEnabled, nextIntent, orderIntents, orderTag, signedNet, type OrderIntent } from "./live-sync";
 import { loadNiftyBook, type NiftyBook } from "./nifty";
 import { applyTick } from "./reversal";
 import { keepTwoDays } from "./session-api";
@@ -30,6 +30,10 @@ type Creds = { clientId: string; accessToken: string };
 const owner = randomUUID();
 const claimed = new Set<string>();
 const fills = new Map<string, Fill>();
+const pending = new Map<string, OrderIntent>();
+const draining = new Set<string>();
+const flatWaits = new Map<string, number>();
+const watched = new Map<string, Set<string>>();
 const tickBuf: { day: string; t: number; securityId: string; kind: string; strike: number; ltp: number }[] = [];
 
 let started = false;
@@ -42,6 +46,13 @@ let niftyBook: BookSnap = freshBook();
 let bankBook: BookSnap = freshBook();
 let expiry = "";
 let bankExpiry = "";
+
+function watchId(symbol: string, securityId: string) {
+  if (!securityId) return;
+  const ids = watched.get(symbol) ?? new Set<string>();
+  ids.add(securityId);
+  watched.set(symbol, ids);
+}
 
 function freshBook(): BookSnap {
   return { trades: [], seen: [], total: 0, closedPnl: 0 };
@@ -279,12 +290,19 @@ function step(run: Run, nowPhase: DeskPhase, env: DhanEnv) {
     if (intent.side !== "SELL" || !ordersAllowed(nowPhase, "SELL")) return false;
     const trade = next.trades.find((row) => row.id === intent.tradeId);
     if (!trade || !intentIsFresh(trade, "SELL", now)) return false;
-    if (liveOrdersEnabled() && !claimed.has(orderTag(intent.tradeId, "BUY")) && !buyIds.has(intent.tradeId)) return false;
+    const buyTag = orderTag(intent.tradeId, "BUY");
+    if (liveOrdersEnabled() && !claimed.has(buyTag) && !pending.has(buyTag) && !buyIds.has(intent.tradeId)) return false;
     return true;
   });
   const intents = [...buys, ...sells];
   run.book = next;
-  if (acceptOrders && holdsLock && intents.length) void dispatch(intents, env);
+  if (!acceptOrders || !holdsLock) return;
+  for (const intent of intents) {
+    watchId(intent.symbol, intent.securityId);
+    const tag = orderTag(intent.tradeId, intent.side);
+    if (!claimed.has(tag)) pending.set(tag, intent);
+  }
+  if (pending.size) void drain(run.symbol, env);
 }
 
 function clampFlat(book: BookSnap, priceOf: (id: string) => number | undefined, now: number): BookSnap {
@@ -306,34 +324,94 @@ function clampFlat(book: BookSnap, priceOf: (id: string) => number | undefined, 
   };
 }
 
-async function dispatch(intents: OrderIntent[], env: DhanEnv) {
-  const groups = new Map<string, OrderIntent[]>();
-  for (const intent of intents) {
-    const key = `${intent.symbol}:${intent.tradeId}`;
-    groups.set(key, [...(groups.get(key) ?? []), intent]);
+async function drain(symbol: OrderIntent["symbol"], env: DhanEnv) {
+  if (draining.has(symbol)) return;
+  draining.add(symbol);
+  try {
+    while (acceptOrders && holdsLock) {
+      const phaseNow = deskPhase();
+      const queued = [...pending.values()].filter((intent) => intent.symbol === symbol);
+      if (!ordersAllowed(phaseNow, "BUY")) {
+        for (const intent of queued) if (intent.side === "BUY") pending.delete(orderTag(intent.tradeId, "BUY"));
+      }
+      const intent = nextIntent(
+        [...pending.values()].filter((row) => row.symbol === symbol),
+        ordersAllowed(phaseNow, "BUY"),
+        ordersAllowed(phaseNow, "SELL"),
+      );
+      if (!intent) break;
+      const outcome = await send(intent, env);
+      if (outcome === "wait") await sleep(300);
+    }
+  } finally {
+    draining.delete(symbol);
   }
-  await Promise.all(
-    [...groups.values()].map(async (group) => {
-      const ordered = [...group.filter((intent) => intent.side === "BUY"), ...group.filter((intent) => intent.side === "SELL")];
-      for (const intent of ordered) await send(intent, env);
-    }),
-  );
 }
 
-async function send(intent: OrderIntent, env: DhanEnv) {
+async function send(intent: OrderIntent, env: DhanEnv): Promise<"done" | "wait"> {
   const tag = orderTag(intent.tradeId, intent.side);
-  if (claimed.has(tag)) return;
-  if (!ordersAllowed(deskPhase(), intent.side)) return;
-  claimed.add(tag);
-  if (!liveOrdersEnabled()) return;
+  if (!liveOrdersEnabled() || !acceptOrders || !holdsLock) return "wait";
+  if (claimed.has(tag)) {
+    pending.delete(tag);
+    return "done";
+  }
+  if (!ordersAllowed(deskPhase(), intent.side)) return "wait";
+  const token = await mintAccessToken(env);
+  const creds = { clientId: env.clientId, accessToken: token };
+  const known = fills.get(intent.tradeId) ?? {};
+  const existingId = intent.side === "BUY" ? known.buyOrderId : known.sellOrderId;
+  if (existingId) {
+    const state = await orderState(creds, existingId);
+    if (state === "TRADED") {
+      claimed.add(tag);
+      pending.delete(tag);
+      flatWaits.delete(tag);
+      void remember(tag, intent, existingId);
+      return "done";
+    }
+    if (state === "REJECTED" || state === "CANCELLED" || state === "EXPIRED") {
+      if (intent.side === "BUY") known.buyOrderId = undefined;
+      else known.sellOrderId = undefined;
+      fills.set(intent.tradeId, known);
+    } else {
+      note = `${intent.symbol} ${intent.side} is still working at Dhan. The next lot waits.`;
+      return "wait";
+    }
+  }
+  let nets: { securityId: string; netQty: number }[] = [];
   try {
-    const token = await mintAccessToken(env);
-    const creds = { clientId: env.clientId, accessToken: token };
+    nets = await indexNets(creds, intent.symbol);
+  } catch {
+    note = `${intent.symbol} position book could not be read. No order was sent.`;
+    return "wait";
+  }
+  const gate = gateOrder({ side: intent.side, securityId: intent.securityId, qty: intent.qty, nets, busy: false });
+  if (!gate.ok && gate.reason === "flat") {
+    if (!claimed.has(orderTag(intent.tradeId, "BUY"))) {
+      note = `${intent.symbol} sell is waiting until its buy is filled.`;
+      return "wait";
+    }
+    const seen = (flatWaits.get(tag) ?? 0) + 1;
+    flatWaits.set(tag, seen);
+    if (seen < 6) {
+      note = `${intent.symbol} sell is waiting for Dhan to show the long.`;
+      return "wait";
+    }
+    claimed.add(tag);
+    pending.delete(tag);
+    note = `${intent.symbol} is already flat at Dhan. No short was opened.`;
+    return "done";
+  }
+  if (!gate.ok) {
+    note = `${intent.symbol} buy is waiting. The open lot has to be flat before the next ATM.`;
+    return "wait";
+  }
+  try {
     const res = await sendOrder(creds, {
       securityId: intent.securityId,
       segment: "NSE_FNO",
       side: intent.side,
-      qty: intent.qty,
+      qty: gate.qty,
       symbol: intent.symbol,
       correlationId: tag,
     });
@@ -342,38 +420,83 @@ async function send(intent: OrderIntent, env: DhanEnv) {
     else fill.sellOrderId = res.orderId;
     delete fill.error;
     fills.set(intent.tradeId, fill);
-    note = `${intent.symbol} ${intent.side} market ${intent.qty} · ${res.orderId}`;
-    void remember(tag, intent, res.orderId);
+    note = `${intent.symbol} ${intent.side} market ${gate.qty} · ${res.orderId}`;
+    const state = await orderState(creds, res.orderId);
+    if (state === "TRADED") {
+      claimed.add(tag);
+      pending.delete(tag);
+      flatWaits.delete(tag);
+      void remember(tag, { ...intent, qty: gate.qty }, res.orderId);
+      return "done";
+    }
+    if (state === "REJECTED" || state === "CANCELLED" || state === "EXPIRED") {
+      throw new Error(`Dhan ${state.toLowerCase()} the ${intent.side.toLowerCase()}.`);
+    }
+    note = `${intent.symbol} ${intent.side} is with Dhan. Nothing else is sent until it finishes.`;
+    return "wait";
   } catch (err) {
-    claimed.delete(tag);
     const message = err instanceof Error ? err.message : "Order failed.";
     const fill = fills.get(intent.tradeId) ?? {};
     fill.tries = (fill.tries ?? 0) + 1;
     fill.error = message;
     fills.set(intent.tradeId, fill);
     note = `${intent.symbol} ${intent.side} failed. ${message}`;
-    const rejected = err instanceof DhanError && err.status >= 400 && err.status < 500 && err.status !== 429;
-    const buyGaveUp = intent.side === "BUY" && (fill.tries ?? 0) >= 5;
-    if (rejected || buyGaveUp || !ordersAllowed(deskPhase(), intent.side)) {
-      claimed.add(tag);
-      return;
-    }
     try {
-      const token = await mintAccessToken(env);
-      const existing = await findOrder({ clientId: env.clientId, accessToken: token }, tag);
+      const existing = await findOrder(creds, tag);
       if (existing) {
-        claimed.add(tag);
-        const known = fills.get(intent.tradeId) ?? {};
-        if (intent.side === "BUY") known.buyOrderId = existing;
-        else known.sellOrderId = existing;
-        fills.set(intent.tradeId, known);
-        void remember(tag, intent, existing);
-        return;
+        if (intent.side === "BUY") fill.buyOrderId = existing;
+        else fill.sellOrderId = existing;
+        fills.set(intent.tradeId, fill);
+        return "wait";
       }
     } catch {
-      /* the retry below is the only second chance */
+      /* the next pass reads the book again */
     }
-    setTimeout(() => void send(intent, env), intent.side === "SELL" ? 1500 : 800);
+    const rejected = err instanceof DhanError && err.status >= 400 && err.status < 500 && err.status !== 429;
+    if (rejected || (fill.tries ?? 0) >= 5) {
+      claimed.add(tag);
+      pending.delete(tag);
+    }
+    return "wait";
+  }
+}
+
+async function indexNets(creds: Creds, symbol: OrderIntent["symbol"]): Promise<{ securityId: string; netQty: number }[]> {
+  const body = await dhan<unknown>(creds, "/positions");
+  const rows = Array.isArray(body) ? body : ((body as { data?: unknown }).data ?? []);
+  if (!Array.isArray(rows)) throw new Error("Dhan positions were not readable.");
+  const nets: { securityId: string; netQty: number }[] = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const rec = row as {
+      securityId?: string | number;
+      tradingSymbol?: string;
+      exchangeSegment?: string;
+      productType?: string;
+      positionType?: string;
+      netQty?: number;
+    };
+    if (String(rec.exchangeSegment ?? "") !== "NSE_FNO") continue;
+    if (String(rec.productType ?? "") !== "INTRADAY") continue;
+    const name = String(rec.tradingSymbol ?? "").toUpperCase();
+    const id = String(rec.securityId ?? "");
+    const named = symbol === "BANKNIFTY" ? name.startsWith("BANKNIFTY") : name.startsWith("NIFTY") && !name.startsWith("BANKNIFTY");
+    if (!named && !(watched.get(symbol)?.has(id))) continue;
+    const netQty = signedNet(String(rec.positionType ?? ""), Number(rec.netQty) || 0);
+    if (netQty === 0) continue;
+    nets.push({ securityId: String(rec.securityId ?? ""), netQty });
+  }
+  return nets;
+}
+
+async function orderState(creds: Creds, orderId: string): Promise<string> {
+  try {
+    const body = await dhan<unknown>(creds, `/orders/${encodeURIComponent(orderId)}`);
+    const row = Array.isArray(body) ? body[0] : ((body as { data?: unknown }).data ?? body);
+    const rec = (Array.isArray(row) ? row[0] : row) as { orderStatus?: string } | undefined;
+    return String(rec?.orderStatus ?? "").toUpperCase();
+  } catch {
+    return "";
   }
 }
 
@@ -423,10 +546,20 @@ async function restore(nifty: Run, bank: Run | null) {
     const row = rows[0];
     if (row?.expiry === nifty.expiry) nifty.book = asBook(row.book);
     if (bank && row?.bank_expiry === bank.expiry) bank.book = asBook(row.bank_book);
-    const tags = await niftyQuery<{ tag: string }>("select tag from live_order where day = $1", [istDateKey()]);
-    for (const tag of tags) claimed.add(tag.tag);
   } catch {
     /* a missing database still lets the paper run in memory */
+  }
+  try {
+    const tags = await niftyQuery<{ tag: string; symbol: string; security_id: string }>(
+      "select tag, symbol, security_id from live_order where day = $1",
+      [istDateKey()],
+    );
+    for (const tag of tags) {
+      claimed.add(tag.tag);
+      watchId(tag.symbol, tag.security_id);
+    }
+  } catch {
+    /* no order tags yet */
   }
 }
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EMPTY_BOOK, type BookSnap, type CrossTrade } from "./cross-math.ts";
-import { orderIntents, orderTag, intentIsFresh } from "./live-sync.ts";
+import { gateOrder, nextIntent, orderIntents, orderTag, intentIsFresh, signedNet, type OrderIntent } from "./live-sync.ts";
 
 function trade(id: string, status: "open" | "closed"): CrossTrade {
   return {
@@ -55,4 +55,37 @@ test("a restart does not treat an old paper as a new market order", () => {
   assert.equal(intentIsFresh({ entryTs: now - 1_000 }, "BUY", now), true);
   assert.equal(intentIsFresh({ entryTs: now - 120_000 }, "BUY", now), false);
   assert.equal(intentIsFresh({ entryTs: now - 120_000, exitTs: now - 500 }, "SELL", now), true);
+});
+
+test("a buy waits while any lot of that index is still open", () => {
+  assert.equal(signedNet("LONG", 65), 65);
+  assert.equal(signedNet("SHORT", 65), -65);
+  assert.equal(signedNet("CLOSED", 65), 0);
+  const flat = gateOrder({ side: "BUY", securityId: "99", qty: 65, nets: [], busy: false });
+  assert.deepEqual(flat, { ok: true, qty: 65 });
+  const same = gateOrder({ side: "BUY", securityId: "99", qty: 65, nets: [{ securityId: "99", netQty: 65 }], busy: false });
+  assert.equal(same.ok, false);
+  const other = gateOrder({ side: "BUY", securityId: "100", qty: 65, nets: [{ securityId: "99", netQty: 65 }], busy: false });
+  assert.equal(other.ok, false);
+  if (!other.ok) assert.equal(other.wait, true);
+});
+
+test("a sell flattens the long quantity and never opens a short", () => {
+  const one = gateOrder({ side: "SELL", securityId: "99", qty: 65, nets: [{ securityId: "99", netQty: 65 }], busy: false });
+  assert.deepEqual(one, { ok: true, qty: 65 });
+  const extra = gateOrder({ side: "SELL", securityId: "99", qty: 65, nets: [{ securityId: "99", netQty: 130 }], busy: false });
+  assert.deepEqual(extra, { ok: true, qty: 130 });
+  const none = gateOrder({ side: "SELL", securityId: "99", qty: 65, nets: [], busy: false });
+  assert.deepEqual(none, { ok: false, wait: false, reason: "flat" });
+  const short = gateOrder({ side: "SELL", securityId: "99", qty: 65, nets: [{ securityId: "99", netQty: -65 }], busy: false });
+  assert.equal(short.ok, false);
+});
+
+test("the old ATM is sold before the new buy, and a same-trade round trip buys first", () => {
+  const sell = (id: string): OrderIntent => ({ tradeId: id, side: "SELL", securityId: "99", qty: 65, symbol: "NIFTY" });
+  const buy = (id: string): OrderIntent => ({ tradeId: id, side: "BUY", securityId: "100", qty: 65, symbol: "NIFTY" });
+  assert.equal(nextIntent([sell("old"), buy("new")], true, true)?.tradeId, "old");
+  assert.equal(nextIntent([buy("same"), sell("same")], true, true)?.side, "BUY");
+  assert.equal(nextIntent([sell("same")], true, true)?.side, "SELL");
+  assert.equal(nextIntent([buy("new")], false, true), null);
 });
