@@ -61,17 +61,14 @@ export async function mintAccessToken(env: DhanEnv): Promise<string> {
 }
 
 async function requestAccessToken(env: DhanEnv): Promise<string> {
-  const url = `https://auth.dhan.co/app/generateAccessToken?dhanClientId=${encodeURIComponent(env.clientId)}&pin=${encodeURIComponent(env.pin)}`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      app_id: env.apiKey,
-      app_secret: env.apiSecret,
-      totp: totpCode(env.totpSecret),
-    },
-  });
+  const totp = totpCode(env.totpSecret);
+  const url = `https://auth.dhan.co/app/generateAccessToken?dhanClientId=${encodeURIComponent(env.clientId)}&pin=${encodeURIComponent(env.pin)}&totp=${encodeURIComponent(totp)}`;
+  const response = await fetch(url, { method: "POST" });
   const text = await response.text();
-  if (!response.ok) throw new Error(`Dhan login failed (${response.status}).`);
+  if (!response.ok) {
+    const detail = text.replace(/\s+/g, " ").slice(0, 160);
+    throw new Error(`Dhan login failed (${response.status}). ${detail}`.trim());
+  }
   let token = "";
   try {
     const body = JSON.parse(text) as { accessToken?: string; access_token?: string };

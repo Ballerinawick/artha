@@ -18,8 +18,10 @@ test("shares one generated token across concurrent and later callers", async () 
   const token = tokenWithExpiry(Date.now() + 60 * 60 * 1000);
   const originalFetch = globalThis.fetch;
   let requests = 0;
-  globalThis.fetch = async () => {
+  let requested = "";
+  globalThis.fetch = async (input) => {
     requests += 1;
+    requested = String(input);
     await new Promise((resolve) => setTimeout(resolve, 10));
     return new Response(JSON.stringify({ accessToken: token }), { status: 200 });
   };
@@ -32,6 +34,8 @@ test("shares one generated token across concurrent and later callers", async () 
     assert.equal(second, token);
     assert.equal(later, token);
     assert.equal(requests, 1);
+    assert.match(requested, /[?&]totp=\d{6}(?:&|$)/);
+    assert.doesNotMatch(requested, /app_secret|apiKey/);
   } finally {
     globalThis.fetch = originalFetch;
   }
