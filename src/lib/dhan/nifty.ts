@@ -93,7 +93,8 @@ function istStamp(d: Date, withTime: boolean): string {
 }
 
 async function nearestFuture(): Promise<OptContract> {
-  return cachedStale("nifty-fut-front", 21_600_000, async () => {
+  const today = istStamp(new Date(), false);
+  return cachedStale(`nifty-fut-front:${today}`, 60 * 60 * 1000, async () => {
     const res = await fetch("https://images.dhan.co/api-data/api-scrip-master.csv", { signal: AbortSignal.timeout(20000) });
     if (!res.ok) throw new Error("Could not read the Nifty future from Dhan's scrip list.");
     const lines = (await res.text()).split(/\r?\n/);
@@ -101,7 +102,6 @@ async function nearestFuture(): Promise<OptContract> {
     const idAt = header.indexOf("SEM_SMST_SECURITY_ID");
     const symAt = header.indexOf("SEM_TRADING_SYMBOL");
     const expAt = header.indexOf("SEM_EXPIRY_DATE");
-    const today = istStamp(new Date(), false);
     let best: { id: string; expiry: string } | null = null;
     for (const line of lines.slice(1)) {
       const col = line.split(",");

@@ -14,12 +14,14 @@ import { applyTick } from "./reversal";
 import { keepTwoDays } from "./session-api";
 import { deskPhase, msUntilSession, ordersAllowed, SERVER_CUT, type DeskPhase } from "./session-clock";
 import { parseFeed, type FeedTick } from "./ticks";
+import { contractIsLive } from "./week";
 
 type Leg = WaveLeg & { kind: "FUT" | "CE" | "PE"; strike: number };
 type Run = {
   symbol: "NIFTY" | "BANKNIFTY";
   lot: number;
   expiry: string;
+  futureExpiry: string;
   futureId: string;
   legs: Map<string, Leg>;
   book: BookSnap;
@@ -173,7 +175,7 @@ function seedRun(symbol: Run["symbol"], chain: NiftyBook): Run {
   };
   seed(chain.future, "FUT", chain.history.future);
   for (const contract of chain.ladder) seed(contract, contract.type === "PE" ? "PE" : "CE", chain.history.ladder[contract.securityId] ?? []);
-  return { symbol, lot: chain.lot, expiry: chain.expiry, futureId: chain.future.securityId, legs, book: freshBook() };
+  return { symbol, lot: chain.lot, expiry: chain.expiry, futureExpiry: chain.future.why, futureId: chain.future.securityId, legs, book: freshBook() };
 }
 
 async function feed(env: DhanEnv, creds: Creds, runs: Run[]) {
@@ -184,7 +186,10 @@ async function feed(env: DhanEnv, creds: Creds, runs: Run[]) {
     let ending = false;
     const clock = setInterval(() => {
       phase = deskPhase();
-      if (phase === "shutdown" || phase === "sleep") finish();
+      const today = istDateKey();
+      const expired = runs.some((run) => !contractIsLive(run.expiry, today) || !contractIsLive(run.futureExpiry, today));
+      if (expired) note = "The contract expired. Lightsail is loading the next one.";
+      if (phase === "shutdown" || phase === "sleep" || expired) finish();
     }, 500);
     const beat = setInterval(() => {
       void tryLock().then((ok) => {

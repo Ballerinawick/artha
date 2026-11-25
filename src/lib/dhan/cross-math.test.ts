@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { nextDayFile } from "./day-tape.ts";
 import { EMPTY_BOOK, crossPnl, reduceAtm, type CrossTrade, type WaveLeg } from "./cross-math.ts";
-import { niftyWeekday, pickExpiry } from "./week.ts";
+import { contractIsLive, niftyWeekday, pickExpiry } from "./week.ts";
 
 /** Wednesday 21 Oct 2026, minute offset from 09:15 IST. */
 function at(minute: number): number {
@@ -257,6 +257,8 @@ test("one lot profit is the premium move times 65, then sixty off", () => {
 test("Wednesday does not keep Tuesday's expiry, and the next day starts empty", () => {
   assert.equal(pickExpiry(["2026-10-20", "2026-10-27"], "2026-10-21"), "2026-10-27");
   assert.equal(pickExpiry(["2026-10-20"], "2026-10-20"), "2026-10-20");
+  assert.equal(contractIsLive("2026-11-23", "2026-11-25"), false);
+  assert.equal(contractIsLive("2026-12-29", "2026-11-25"), true);
   assert.equal(niftyWeekday(new Date(Date.UTC(2026, 9, 21, 4, 0))), "Wednesday · day 1");
   assert.equal(niftyWeekday(new Date(Date.UTC(2026, 9, 20, 4, 0))), "Tuesday · expiry");
   const rolled = nextDayFile(

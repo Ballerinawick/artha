@@ -9,6 +9,13 @@ export function pickExpiry(list: string[], today = istDateKey()): string | null 
   return iso.filter((item) => item >= today).sort()[0] ?? null;
 }
 
+/** A dated contract from before today cannot be traded. An empty or non-date label is left alone. */
+export function contractIsLive(expiry: string, today = istDateKey()): boolean {
+  const day = expiry.trim().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return true;
+  return day >= today;
+}
+
 /** Wednesday is day 1 of the Nifty week. Tuesday is expiry. A holiday does not move Tuesday. */
 export function niftyWeekday(date = new Date()): string {
   const day = istClock(date).weekday;

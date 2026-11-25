@@ -13,6 +13,7 @@ import { applyServerBook, openSession, setServerOwns, syncCrossBook, touchOpenMa
 import { barsFor, inCashSession, olderBars, prepareDay } from "./day-tape";
 import { saveNiftyTicks } from "./session-api";
 import { istDateKey } from "@/lib/market/hours";
+import { contractIsLive } from "./week";
 import {
   applyTick,
   completedBars,
@@ -73,6 +74,8 @@ function readCachedBook(): NiftyBook | undefined {
     if (!raw) return undefined;
     const book = JSON.parse(raw) as NiftyBook;
     if (!book?.future?.securityId || !book.chain?.length || (book.ladder?.length ?? 0) < 4) return undefined;
+    const today = istDateKey();
+    if (!contractIsLive(book.expiry, today) || !contractIsLive(book.future?.why ?? "", today)) return undefined;
     return book;
   } catch {
     return undefined;

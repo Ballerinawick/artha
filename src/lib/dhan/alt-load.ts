@@ -58,7 +58,8 @@ function istStamp(d: Date, withTime: boolean): string {
 }
 
 async function frontFuture(spec: AltSpec): Promise<{ securityId: string; expiry: string; lot: number }> {
-  return cachedStale(`alt-fut:${spec.symbol}`, 21_600_000, async () => {
+  const today = istStamp(new Date(), false);
+  return cachedStale(`alt-fut:${spec.symbol}:${today}`, 60 * 60 * 1000, async () => {
     const res = await fetch("https://images.dhan.co/api-data/api-scrip-master.csv", { signal: AbortSignal.timeout(20000) });
     if (!res.ok) throw new Error(`Could not read the ${spec.name} future.`);
     const lines = (await res.text()).split(/\r?\n/);
@@ -67,7 +68,6 @@ async function frontFuture(spec: AltSpec): Promise<{ securityId: string; expiry:
     const symAt = header.indexOf("SEM_TRADING_SYMBOL");
     const expAt = header.indexOf("SEM_EXPIRY_DATE");
     const lotAt = header.indexOf("SEM_LOT_UNITS");
-    const today = istStamp(new Date(), false);
     let best: { securityId: string; expiry: string; lot: number } | null = null;
     for (const line of lines.slice(1)) {
       const col = line.split(",");
