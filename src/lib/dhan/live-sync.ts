@@ -17,8 +17,8 @@ export type GateDecision =
   | { ok: true; qty: number }
   | { ok: false; wait: boolean; reason: "busy" | "open" | "flat" | "qty" };
 
-/** A market order is allowed only when the paper transition is this fresh. Older rows are history, not a new signal. */
-export const FRESH_MS = 90_000;
+/** The paper clock is the bar time. The row is only created once that minute has closed, about two minutes later. */
+export const FRESH_MS = 4 * 60 * 1000;
 
 export function intentIsFresh(trade: { entryTs: number; exitTs?: number }, side: "BUY" | "SELL", now: number): boolean {
   const ts = side === "BUY" ? trade.entryTs : (trade.exitTs ?? 0);
