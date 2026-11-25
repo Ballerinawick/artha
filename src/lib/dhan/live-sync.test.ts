@@ -53,7 +53,8 @@ test("order tags are stable and differ by side", () => {
 test("a restart does not treat an old paper as a new market order", () => {
   const now = 1_700_000_000_000;
   assert.equal(intentIsFresh({ entryTs: now - 1_000 }, "BUY", now), true);
-  assert.equal(intentIsFresh({ entryTs: now - 120_000 }, "BUY", now), false);
+  assert.equal(intentIsFresh({ entryTs: now - 2 * 60_000 }, "BUY", now), true);
+  assert.equal(intentIsFresh({ entryTs: now - 5 * 60_000 }, "BUY", now), false);
   assert.equal(intentIsFresh({ entryTs: now - 120_000, exitTs: now - 500 }, "SELL", now), true);
 });
 
