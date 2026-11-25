@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { ConnectView } from "@/components/connect-view";
+import { PositionBook } from "@/components/position-book";
 
 export const Route = createFileRoute("/")({
-  component: ConnectView,
+  component: PositionBook,
 });

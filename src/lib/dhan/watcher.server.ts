@@ -117,7 +117,8 @@ async function main(env: DhanEnv) {
     }
     phase = deskPhase();
     if (phase === "shutdown" || phase === "sleep") continue;
-    await sleep(2000);
+    const login = /login failed|too many attempts|access token/i.test(note);
+    await sleep(login ? 60_000 : 2000);
   }
 }
 

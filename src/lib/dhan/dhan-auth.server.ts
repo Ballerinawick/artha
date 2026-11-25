@@ -70,13 +70,16 @@ async function requestAccessToken(env: DhanEnv): Promise<string> {
     throw new Error(`Dhan login failed (${response.status}). ${detail}`.trim());
   }
   let token = "";
+  let detail = "";
   try {
-    const body = JSON.parse(text) as { accessToken?: string; access_token?: string };
+    const body = JSON.parse(text) as { accessToken?: string; access_token?: string; message?: string };
     token = String(body.accessToken ?? body.access_token ?? "");
+    detail = String(body.message ?? "");
   } catch {
     token = "";
+    detail = text.replace(/\s+/g, " ").slice(0, 160);
   }
-  if (token.length < 20) throw new Error("Dhan login did not return a token.");
+  if (token.length < 20) throw new Error(`Dhan login failed. ${detail || "No access token."}`.trim());
   return token;
 }
 

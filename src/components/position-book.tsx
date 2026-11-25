@@ -1,11 +1,9 @@
-import { Navigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { DeskShell } from "@/components/desk-shell";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useCrossBook, useDeskMirror } from "@/lib/dhan/cross-book";
 import { CROSS_BROKERAGE, crossPnl, type CrossTrade } from "@/lib/dhan/cross-math";
 import { useAltTape } from "@/lib/dhan/alt-tape";
-import { useDhanCreds } from "@/lib/dhan/session";
 import { usePremiumEngine } from "@/lib/dhan/use-premium-engine";
 import { niftyWeekday } from "@/lib/dhan/week";
 import { formatInr } from "@/lib/market/hours";
@@ -13,7 +11,6 @@ import { formatInr } from "@/lib/market/hours";
 export function PositionBook() {
   const [ready, setReady] = useState(false);
   useEffect(() => setReady(true), []);
-  const creds = useDhanCreds();
   const engine = usePremiumEngine();
   const trades = useCrossBook((s) => s.trades);
   const total = useCrossBook((s) => s.total);
@@ -29,7 +26,6 @@ export function PositionBook() {
       </DeskShell>
     );
   }
-  if (!creds) return <Navigate to="/" />;
 
   const niftyRows = trades.map((trade) => ({ symbol: "NIFTY", trade, px: livePx(trade, engine) }));
   const altRows = Object.entries(altPapers).flatMap(([symbol, book]) =>
