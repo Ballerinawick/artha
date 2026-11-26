@@ -204,7 +204,8 @@ async function feed(env: DhanEnv, _creds: Creds, runs: Run[]) {
     let stopped = false;
     let socket: WebSocket | null = null;
     let reconnect: ReturnType<typeof setTimeout> | null = null;
-    let pause = 1000;
+    let opening = false;
+    let pause = 3000;
     const clock = setInterval(() => {
       phase = deskPhase();
       const today = istDateKey();
@@ -232,17 +233,25 @@ async function feed(env: DhanEnv, _creds: Creds, runs: Run[]) {
       resolve();
     };
     const connect = () => {
-      if (stopped) return;
+      if (stopped || opening) return;
+      opening = true;
+      if (reconnect) {
+        clearTimeout(reconnect);
+        reconnect = null;
+      }
       void mintAccessToken(env)
         .then((token) => {
           if (stopped) return;
+          const previous = socket;
+          if (previous && previous.readyState !== WebSocket.CLOSED) previous.close();
           const url = `wss://api-feed.dhan.co?version=2&token=${encodeURIComponent(token)}&clientId=${encodeURIComponent(env.clientId)}&authType=2`;
           const next = new WebSocket(url);
           socket = next;
           next.binaryType = "arraybuffer";
           next.addEventListener("open", () => {
             if (stopped || next !== socket) return;
-            pause = 1000;
+            opening = false;
+            pause = 3000;
             const ids = [...new Set(runs.flatMap((run) => [...run.legs.keys()]))];
             const list = [
               { ExchangeSegment: "IDX_I", SecurityId: "13" },
@@ -260,10 +269,15 @@ async function feed(env: DhanEnv, _creds: Creds, runs: Run[]) {
             onTicks(parseFeed(data), runs, env);
           });
           next.addEventListener("close", (event) => {
+            opening = false;
             if (stopped || next !== socket) return;
             const why = event.reason ? ` ${event.reason}` : "";
             note = `Mumbai feed dropped (${event.code}${why}). Lightsail is reconnecting.`;
-            reconnect = setTimeout(connect, pause);
+            if (reconnect) return;
+            reconnect = setTimeout(() => {
+              reconnect = null;
+              connect();
+            }, pause);
             pause = Math.min(pause * 2, 15_000);
           });
           next.addEventListener("error", () => {
@@ -271,9 +285,14 @@ async function feed(env: DhanEnv, _creds: Creds, runs: Run[]) {
           });
         })
         .catch((err) => {
+          opening = false;
           if (stopped) return;
           note = err instanceof Error ? err.message : "The Mumbai feed could not reconnect.";
-          reconnect = setTimeout(connect, 60_000);
+          if (reconnect) return;
+          reconnect = setTimeout(() => {
+            reconnect = null;
+            connect();
+          }, 60_000);
         });
     };
     connect();
