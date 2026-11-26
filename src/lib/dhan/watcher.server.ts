@@ -179,12 +179,12 @@ function seedRun(symbol: Run["symbol"], chain: NiftyBook): Run {
   return { symbol, lot: chain.lot, expiry: chain.expiry, futureExpiry: chain.future.why, futureId: chain.future.securityId, legs, book: freshBook() };
 }
 
-async function feed(env: DhanEnv, creds: Creds, runs: Run[]) {
-  const url = `wss://api-feed.dhan.co?version=2&token=${encodeURIComponent(creds.accessToken)}&clientId=${encodeURIComponent(env.clientId)}&authType=2`;
-  await new Promise<void>((resolve, reject) => {
-    const socket = new WebSocket(url);
-    socket.binaryType = "arraybuffer";
-    let ending = false;
+async function feed(env: DhanEnv, _creds: Creds, runs: Run[]) {
+  await new Promise<void>((resolve) => {
+    let stopped = false;
+    let socket: WebSocket | null = null;
+    let reconnect: ReturnType<typeof setTimeout> | null = null;
+    let pause = 1000;
     const clock = setInterval(() => {
       phase = deskPhase();
       const today = istDateKey();
@@ -200,49 +200,62 @@ async function feed(env: DhanEnv, creds: Creds, runs: Run[]) {
     }, 10_000);
     const ticksFlush = setInterval(() => void flushTicks(), 250);
     const bookFlush = setInterval(() => void persistBooks(runs).catch(() => undefined), 2000);
-    const stopTimers = () => {
+    const finish = () => {
+      if (stopped) return;
+      stopped = true;
       clearInterval(clock);
       clearInterval(beat);
       clearInterval(ticksFlush);
       clearInterval(bookFlush);
-    };
-    const finish = () => {
-      if (ending) return;
-      ending = true;
-      stopTimers();
-      socket.close();
+      if (reconnect) clearTimeout(reconnect);
+      socket?.close();
       resolve();
     };
-    socket.addEventListener("open", () => {
-      const ids = [...new Set(runs.flatMap((run) => [...run.legs.keys()]))];
-      const list = [
-        { ExchangeSegment: "IDX_I", SecurityId: "13" },
-        { ExchangeSegment: "IDX_I", SecurityId: "25" },
-        ...ids.map((id) => ({ ExchangeSegment: "NSE_FNO", SecurityId: id })),
-      ];
-      socket.send(JSON.stringify({ RequestCode: 21, InstrumentCount: list.length, InstrumentList: list }));
-      if (!note.startsWith("Live orders are paused") && !note.startsWith("Paper")) {
-        note = acceptOrders ? "Mumbai feed is on. Market orders fire with the paper." : note;
-      }
-    });
-    socket.addEventListener("message", (event) => {
-      const data = event.data;
-      if (!(data instanceof ArrayBuffer) || ending) return;
-      onTicks(parseFeed(data), runs, env);
-    });
-    socket.addEventListener("close", () => {
-      if (ending) return;
-      ending = true;
-      stopTimers();
-      if (deskPhase() === "shutdown" || deskPhase() === "sleep") resolve();
-      else reject(new Error("Dhan closed the Mumbai feed."));
-    });
-    socket.addEventListener("error", () => {
-      if (ending) return;
-      ending = true;
-      stopTimers();
-      reject(new Error("The Mumbai feed failed."));
-    });
+    const connect = () => {
+      if (stopped) return;
+      void mintAccessToken(env)
+        .then((token) => {
+          if (stopped) return;
+          const url = `wss://api-feed.dhan.co?version=2&token=${encodeURIComponent(token)}&clientId=${encodeURIComponent(env.clientId)}&authType=2`;
+          const next = new WebSocket(url);
+          socket = next;
+          next.binaryType = "arraybuffer";
+          next.addEventListener("open", () => {
+            if (stopped || next !== socket) return;
+            pause = 1000;
+            const ids = [...new Set(runs.flatMap((run) => [...run.legs.keys()]))];
+            const list = [
+              { ExchangeSegment: "IDX_I", SecurityId: "13" },
+              { ExchangeSegment: "IDX_I", SecurityId: "25" },
+              ...ids.map((id) => ({ ExchangeSegment: "NSE_FNO", SecurityId: id })),
+            ];
+            next.send(JSON.stringify({ RequestCode: 21, InstrumentCount: list.length, InstrumentList: list }));
+            if (!note.startsWith("Live orders are paused") && !note.startsWith("Paper")) {
+              note = acceptOrders ? "Mumbai feed is on. Market orders fire with the paper." : note;
+            }
+          });
+          next.addEventListener("message", (event) => {
+            const data = event.data;
+            if (!(data instanceof ArrayBuffer) || stopped || next !== socket) return;
+            onTicks(parseFeed(data), runs, env);
+          });
+          next.addEventListener("close", () => {
+            if (stopped || next !== socket) return;
+            note = "Mumbai feed dropped. Lightsail is reconnecting. The page stays up.";
+            reconnect = setTimeout(connect, pause);
+            pause = Math.min(pause * 2, 15_000);
+          });
+          next.addEventListener("error", () => {
+            if (next.readyState === WebSocket.OPEN || next.readyState === WebSocket.CONNECTING) next.close();
+          });
+        })
+        .catch((err) => {
+          if (stopped) return;
+          note = err instanceof Error ? err.message : "The Mumbai feed could not reconnect.";
+          reconnect = setTimeout(connect, 60_000);
+        });
+    };
+    connect();
   });
 }
 

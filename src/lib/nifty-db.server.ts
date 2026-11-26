@@ -12,11 +12,17 @@ types.setTypeParser(OID_INT8, Number);
 const globalRef = globalThis as typeof globalThis & { __niftyPool__?: Pool };
 
 function pool(): Pool {
-  globalRef.__niftyPool__ ??= new Pool({
-    connectionString: databaseUrl(),
-    ssl: { rejectUnauthorized: false },
-    max: 3,
-  });
+  if (!globalRef.__niftyPool__) {
+    const next = new Pool({
+      connectionString: databaseUrl(),
+      ssl: { rejectUnauthorized: false },
+      max: 3,
+    });
+    next.on("error", () => {
+      // Neon closes idle connections. The next query opens a new one.
+    });
+    globalRef.__niftyPool__ = next;
+  }
   return globalRef.__niftyPool__;
 }
 
