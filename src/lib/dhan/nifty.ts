@@ -136,7 +136,7 @@ export async function readScrip(onLine: (col: string[], header: string[]) => voi
       if (nl < 0) break;
       take(buf.slice(start, nl).replace(/\r$/, ""));
       start = nl + 1;
-      if (++seen % 20000 === 0) {
+      if (++seen % 2000 === 0) {
         buf = buf.slice(start);
         start = 0;
         await new Promise((resolve) => setImmediate(resolve));

@@ -325,13 +325,23 @@ function onTicks(ticks: FeedTick[], runs: Run[], env: DhanEnv) {
     }
   }
   if (tickBuf.length > 5000) tickBuf.splice(0, tickBuf.length - 5000);
-  phase = deskPhase();
-  if (phase === "shutdown" || phase === "sleep") return;
-  for (const run of runs) step(run, phase, env);
-  const nifty = runs.find((run) => run.symbol === "NIFTY");
-  const bank = runs.find((run) => run.symbol === "BANKNIFTY");
-  if (nifty) niftyBook = nifty.book;
-  if (bank) bankBook = bank.book;
+  queueStep(runs, env);
+}
+
+let stepQueued = false;
+function queueStep(runs: Run[], env: DhanEnv) {
+  if (stepQueued) return;
+  stepQueued = true;
+  setImmediate(() => {
+    stepQueued = false;
+    phase = deskPhase();
+    if (phase === "shutdown" || phase === "sleep") return;
+    for (const run of runs) step(run, phase, env);
+    const nifty = runs.find((run) => run.symbol === "NIFTY");
+    const bank = runs.find((run) => run.symbol === "BANKNIFTY");
+    if (nifty) niftyBook = nifty.book;
+    if (bank) bankBook = bank.book;
+  });
 }
 
 function step(run: Run, nowPhase: DeskPhase, env: DhanEnv) {

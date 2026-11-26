@@ -355,11 +355,11 @@ function segmentHit(call: WaveLeg, a0: Point, a1: Point, put: WaveLeg, b0: Point
 
 function samplesOf(leg: WaveLeg, now: number): Point[] {
   const forming = Math.floor(now / 60_000) * 60_000;
-  const day = istClock(new Date(now)).date;
+  const day = istDay(now);
   const map = new Map<number, number>();
   for (const bar of leg.bars) {
     if (!(bar.c > 0) || bar.t >= forming || !inCashSession(bar.t)) continue;
-    if (istClock(new Date(bar.t)).date !== day) continue;
+    if (istDay(bar.t) !== day) continue;
     map.set(bar.t, bar.c);
   }
   const points = despike(
@@ -370,6 +370,14 @@ function samplesOf(leg: WaveLeg, now: number): Point[] {
   if (points.length < 2) return points;
   const end = points[points.length - 1]!.t;
   return points.filter((point) => point.t >= end - 7 * 60 * 60 * 1000);
+}
+
+function istDay(ts: number): string {
+  const d = new Date(ts + (5 * 60 + 30) * 60 * 1000);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }
 
 /** A print that leaves and comes straight back is not a price. The vertical line at 11:20 was one of these. */
