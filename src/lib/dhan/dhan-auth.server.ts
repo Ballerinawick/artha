@@ -12,6 +12,7 @@ type CachedToken = { fingerprint: string; token: string; expiresAt: number };
 
 let cachedToken: CachedToken | null = null;
 let pendingToken: { fingerprint: string; promise: Promise<string> } | null = null;
+let loginNotBefore = 0;
 
 /** Present only when the machine has its own Dhan login. Nothing here is read from the page. */
 export function readDhanEnv(): DhanEnv | null {
@@ -44,6 +45,9 @@ export async function mintAccessToken(env: DhanEnv): Promise<string> {
   if (cachedToken?.fingerprint === fingerprint && cachedToken.expiresAt > Date.now()) {
     return cachedToken.token;
   }
+  if (Date.now() < loginNotBefore) {
+    throw new Error("Dhan login failed. Token can be generated once every 2 minutes.");
+  }
   if (pendingToken?.fingerprint === fingerprint) return pendingToken.promise;
 
   const promise = requestAccessToken(env)
@@ -67,6 +71,7 @@ async function requestAccessToken(env: DhanEnv): Promise<string> {
   const text = await response.text();
   if (!response.ok) {
     const detail = text.replace(/\s+/g, " ").slice(0, 160);
+    if (/2 minutes|too many|attempt/i.test(detail)) loginNotBefore = Date.now() + 130_000;
     throw new Error(`Dhan login failed (${response.status}). ${detail}`.trim());
   }
   let token = "";
