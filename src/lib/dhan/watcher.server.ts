@@ -11,7 +11,6 @@ import { crossPnl, EMPTY_BOOK, markTrades, reduceAtm, type BookSnap, type CrossT
 import { mintAccessToken, readDhanEnv, type DhanEnv } from "./dhan-auth.server";
 import { gateOrder, intentIsFresh, liveOrdersEnabled, nextIntent, orderIntents, orderTag, signedNet, type OrderIntent } from "./live-sync";
 import { loadNiftyBook, type NiftyBook } from "./nifty";
-import { applyTick } from "./reversal";
 import { keepTwoDays } from "./session-api";
 import { deskPhase, msUntilSession, ordersAllowed, SERVER_CUT, type DeskPhase } from "./session-clock";
 import { parseFeed, type FeedTick } from "./ticks";
@@ -270,10 +269,14 @@ function onTicks(ticks: FeedTick[], runs: Run[], env: DhanEnv) {
       const leg = run.legs.get(tick.securityId);
       if (!leg) continue;
       leg.ltp = tick.ltp;
-      leg.bars = applyTick(
-        leg.bars.map((bar) => ({ t: bar.t, o: bar.c, h: bar.c, l: bar.c, c: bar.c, bid: 0, ask: 0 })),
-        { ts: tick.ts || Date.now(), ltp: tick.ltp, bid: tick.bid, ask: tick.ask },
-      ).map((bar) => ({ t: bar.t, c: bar.c }));
+      const bucket = Math.floor((tick.ts || Date.now()) / 60_000) * 60_000;
+      const last = leg.bars[leg.bars.length - 1];
+      if (!last || last.t !== bucket) {
+        leg.bars.push({ t: bucket, c: tick.ltp });
+        if (leg.bars.length > 400) leg.bars.shift();
+      } else {
+        last.c = tick.ltp;
+      }
       tickBuf.push({
         day: istDateKey(),
         t: tick.ts || Date.now(),

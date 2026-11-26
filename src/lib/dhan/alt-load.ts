@@ -3,7 +3,7 @@ import { istClock, istDateKey } from "@/lib/market/hours";
 import { altSpec, type AltSpec } from "./alt-spec";
 import { dhan } from "./client";
 import { inCashSession } from "./day-tape";
-import type { NiftyBook, OptContract } from "./nifty";
+import { readScrip, type NiftyBook, type OptContract } from "./nifty";
 import { paced } from "./pace";
 import type { Bar5 } from "./reversal";
 import type { DhanCreds } from "./types";
@@ -60,25 +60,16 @@ function istStamp(d: Date, withTime: boolean): string {
 async function frontFuture(spec: AltSpec): Promise<{ securityId: string; expiry: string; lot: number }> {
   const today = istStamp(new Date(), false);
   return cachedStale(`alt-fut:${spec.symbol}:${today}`, 60 * 60 * 1000, async () => {
-    const res = await fetch("https://images.dhan.co/api-data/api-scrip-master.csv", { signal: AbortSignal.timeout(20000) });
-    if (!res.ok) throw new Error(`Could not read the ${spec.name} future.`);
-    const lines = (await res.text()).split(/\r?\n/);
-    const header = (lines[0] ?? "").split(",");
-    const idAt = header.indexOf("SEM_SMST_SECURITY_ID");
-    const symAt = header.indexOf("SEM_TRADING_SYMBOL");
-    const expAt = header.indexOf("SEM_EXPIRY_DATE");
-    const lotAt = header.indexOf("SEM_LOT_UNITS");
     let best: { securityId: string; expiry: string; lot: number } | null = null;
-    for (const line of lines.slice(1)) {
-      const col = line.split(",");
-      const symbol = col[symAt] ?? "";
-      if (!spec.fut.test(symbol)) continue;
-      const expiry = (col[expAt] ?? "").slice(0, 10);
-      const securityId = col[idAt] ?? "";
-      const lot = Number(col[lotAt] ?? 0);
-      if (!/^\d+$/.test(securityId) || expiry < today) continue;
+    await readScrip((col, header) => {
+      const symbol = col[header.indexOf("SEM_TRADING_SYMBOL")] ?? "";
+      if (!spec.fut.test(symbol)) return;
+      const expiry = (col[header.indexOf("SEM_EXPIRY_DATE")] ?? "").slice(0, 10);
+      const securityId = col[header.indexOf("SEM_SMST_SECURITY_ID")] ?? "";
+      const lot = Number(col[header.indexOf("SEM_LOT_UNITS")] ?? 0);
+      if (!/^\d+$/.test(securityId) || expiry < today) return;
       if (!best || expiry < best.expiry) best = { securityId, expiry, lot: lot > 0 ? lot : (LOTS[spec.symbol] ?? 0) };
-    }
+    });
     if (!best) throw new Error(`No live ${spec.name} future was found.`);
     return best;
   });

@@ -95,26 +95,59 @@ function istStamp(d: Date, withTime: boolean): string {
 async function nearestFuture(): Promise<OptContract> {
   const today = istStamp(new Date(), false);
   return cachedStale(`nifty-fut-front:${today}`, 60 * 60 * 1000, async () => {
-    const res = await fetch("https://images.dhan.co/api-data/api-scrip-master.csv", { signal: AbortSignal.timeout(20000) });
-    if (!res.ok) throw new Error("Could not read the Nifty future from Dhan's scrip list.");
-    const lines = (await res.text()).split(/\r?\n/);
-    const header = (lines[0] ?? "").split(",");
-    const idAt = header.indexOf("SEM_SMST_SECURITY_ID");
-    const symAt = header.indexOf("SEM_TRADING_SYMBOL");
-    const expAt = header.indexOf("SEM_EXPIRY_DATE");
     let best: { id: string; expiry: string } | null = null;
-    for (const line of lines.slice(1)) {
-      const col = line.split(",");
-      const symbol = col[symAt] ?? "";
-      if (!/^NIFTY-[A-Za-z]{3}\d{4}-FUT$/.test(symbol)) continue;
-      const expiry = (col[expAt] ?? "").slice(0, 10);
-      const id = col[idAt] ?? "";
-      if (!/^\d+$/.test(id) || expiry < today) continue;
+    await readScrip((col, header) => {
+      const symbol = col[header.indexOf("SEM_TRADING_SYMBOL")] ?? "";
+      if (!/^NIFTY-[A-Za-z]{3}\d{4}-FUT$/.test(symbol)) return;
+      const expiry = (col[header.indexOf("SEM_EXPIRY_DATE")] ?? "").slice(0, 10);
+      const id = col[header.indexOf("SEM_SMST_SECURITY_ID")] ?? "";
+      if (!/^\d+$/.test(id) || expiry < today) return;
       if (!best || expiry < best.expiry) best = { id, expiry };
-    }
+    });
     if (!best) throw new Error("No live Nifty future contract was found.");
     return { securityId: best.id, strike: 0, ltp: 0, type: "FUT", why: best.expiry };
   });
+}
+
+/** Walk Dhan's scrip file a piece at a time so the page can keep answering. */
+export async function readScrip(onLine: (col: string[], header: string[]) => void): Promise<void> {
+  const res = await fetch("https://images.dhan.co/api-data/api-scrip-master.csv", { signal: AbortSignal.timeout(30000) });
+  if (!res.ok || !res.body) throw new Error("Could not read Dhan's scrip list.");
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let header: string[] | null = null;
+  let seen = 0;
+  const take = (line: string) => {
+    if (!line) return;
+    if (!header) {
+      header = line.split(",");
+      return;
+    }
+    if (!line.includes("-FUT")) return;
+    onLine(line.split(","), header);
+  };
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (value) buf += decoder.decode(value, { stream: !done });
+    let start = 0;
+    for (;;) {
+      const nl = buf.indexOf("\n", start);
+      if (nl < 0) break;
+      take(buf.slice(start, nl).replace(/\r$/, ""));
+      start = nl + 1;
+      if (++seen % 20000 === 0) {
+        buf = buf.slice(start);
+        start = 0;
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    }
+    buf = buf.slice(start);
+    if (done) {
+      if (buf.trim()) take(buf.replace(/\r$/, ""));
+      break;
+    }
+  }
 }
 
 async function minuteBars(creds: DhanCreds, securityId: string, instrument: "OPTIDX" | "FUTIDX"): Promise<Bar5[]> {

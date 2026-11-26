@@ -1,3 +1,5 @@
 export default function startMumbaiDesk() {
-  void import("../../src/lib/dhan/watcher.server.ts").then((mod) => mod.startDesk());
+  setTimeout(() => {
+    void import("../../src/lib/dhan/watcher.server.ts").then((mod) => mod.startDesk());
+  }, 5000);
 }
