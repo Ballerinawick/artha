@@ -17,6 +17,7 @@ function pool(): Pool {
       connectionString: databaseUrl(),
       ssl: { rejectUnauthorized: false },
       max: 3,
+      connectionTimeoutMillis: 8000,
     });
     next.on("error", () => {
       // Neon closes idle connections. The next query opens a new one.

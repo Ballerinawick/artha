@@ -67,7 +67,7 @@ export async function mintAccessToken(env: DhanEnv): Promise<string> {
 async function requestAccessToken(env: DhanEnv): Promise<string> {
   const totp = totpCode(env.totpSecret);
   const url = `https://auth.dhan.co/app/generateAccessToken?dhanClientId=${encodeURIComponent(env.clientId)}&pin=${encodeURIComponent(env.pin)}&totp=${encodeURIComponent(totp)}`;
-  const response = await fetch(url, { method: "POST" });
+  const response = await fetch(url, { method: "POST", signal: AbortSignal.timeout(15000) });
   const text = await response.text();
   if (!response.ok) {
     const detail = text.replace(/\s+/g, " ").slice(0, 160);

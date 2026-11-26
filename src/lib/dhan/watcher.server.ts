@@ -125,10 +125,12 @@ async function main(env: DhanEnv) {
 }
 
 async function runSession(env: DhanEnv) {
-  holdsLock = await tryLock();
-  const token = await mintAccessToken(env);
+  note = "Logging in to Dhan.";
+  holdsLock = await within(tryLock(), 12_000, "The database");
+  const token = await within(mintAccessToken(env), 20_000, "Dhan login");
   const creds = { clientId: env.clientId, accessToken: token };
-  const chain = await loadNiftyBook(creds);
+  note = "Reading the Nifty chain.";
+  const chain = await within(loadNiftyBook(creds), 90_000, "The Nifty chain");
   let bankChain: NiftyBook | null = null;
   try {
     bankChain = await loadAltBook(creds, "BANKNIFTY");
@@ -179,6 +181,22 @@ function seedRun(symbol: Run["symbol"], chain: NiftyBook): Run {
   seed(chain.future, "FUT", chain.history.future);
   for (const contract of chain.ladder) seed(contract, contract.type === "PE" ? "PE" : "CE", chain.history.ladder[contract.securityId] ?? []);
   return { symbol, lot: chain.lot, expiry: chain.expiry, futureExpiry: chain.future.why, futureId: chain.future.securityId, legs, book: freshBook() };
+}
+
+function within<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} did not answer.`)), ms);
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
 }
 
 async function feed(env: DhanEnv, _creds: Creds, runs: Run[]) {
