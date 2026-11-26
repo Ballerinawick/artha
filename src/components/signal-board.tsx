@@ -1,7 +1,6 @@
-import { Navigate } from "@tanstack/react-router";
 import { useEffect, useState, type ReactNode } from "react";
 import { Delta } from "@/components/delta";
-import { DeskShell } from "@/components/desk-shell";
+import { ChartNeedsBrowser, DeskShell } from "@/components/desk-shell";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getSignalBoard } from "@/lib/dhan/server";
@@ -80,7 +79,7 @@ export function SignalBoard() {
       </DeskShell>
     );
   }
-  if (!creds) return <Navigate to="/" />;
+  if (!creds) return <ChartNeedsBrowser />;
 
   const stocks = signals.filter((s) => s.kind === "stock");
   const options = signals.filter((s) => s.kind === "option");

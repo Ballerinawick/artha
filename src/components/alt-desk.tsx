@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
-import { Navigate } from "@tanstack/react-router";
-import { DeskShell } from "@/components/desk-shell";
+import { ChartNeedsBrowser, DeskShell } from "@/components/desk-shell";
 import { WaveChart } from "@/components/tick-wave";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ALT_SPECS } from "@/lib/dhan/alt-spec";
@@ -37,7 +36,7 @@ export function AltDesk({ symbol, symbols }: { symbol?: string; symbols?: string
       </DeskShell>
     );
   }
-  if (!creds) return <Navigate to="/" />;
+  if (!creds) return <ChartNeedsBrowser />;
 
   const calls = (view?.ladder ?? []).filter((leg) => leg.contract.type === "CE").sort((a, b) => a.contract.strike - b.contract.strike);
   const puts = (view?.ladder ?? []).filter((leg) => leg.contract.type === "PE").sort((a, b) => a.contract.strike - b.contract.strike);

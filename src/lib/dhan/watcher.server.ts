@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { setDefaultResultOrder } from "node:dns";
 import { mkdir, readdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { istDateKey } from "@/lib/market/hours";
@@ -15,6 +16,8 @@ import { keepTwoDays } from "./session-api";
 import { deskPhase, msUntilSession, ordersAllowed, SERVER_CUT, type DeskPhase } from "./session-clock";
 import { parseFeed, type FeedTick } from "./ticks";
 import { contractIsLive } from "./week";
+
+setDefaultResultOrder("ipv4first");
 
 type Leg = WaveLeg & { kind: "FUT" | "CE" | "PE"; strike: number };
 type Run = {
@@ -231,7 +234,7 @@ async function feed(env: DhanEnv, _creds: Creds, runs: Run[]) {
             ];
             next.send(JSON.stringify({ RequestCode: 21, InstrumentCount: list.length, InstrumentList: list }));
             if (!note.startsWith("Live orders are paused") && !note.startsWith("Paper")) {
-              note = acceptOrders ? "Mumbai feed is on. Market orders fire with the paper." : note;
+              note = acceptOrders ? "Mumbai feed is on. Market orders fire with the paper." : "Mumbai feed is on. This process is not sending orders.";
             }
           });
           next.addEventListener("message", (event) => {
@@ -239,9 +242,10 @@ async function feed(env: DhanEnv, _creds: Creds, runs: Run[]) {
             if (!(data instanceof ArrayBuffer) || stopped || next !== socket) return;
             onTicks(parseFeed(data), runs, env);
           });
-          next.addEventListener("close", () => {
+          next.addEventListener("close", (event) => {
             if (stopped || next !== socket) return;
-            note = "Mumbai feed dropped. Lightsail is reconnecting. The page stays up.";
+            const why = event.reason ? ` ${event.reason}` : "";
+            note = `Mumbai feed dropped (${event.code}${why}). Lightsail is reconnecting.`;
             reconnect = setTimeout(connect, pause);
             pause = Math.min(pause * 2, 15_000);
           });

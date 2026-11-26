@@ -13,6 +13,16 @@ const LINKS = [
   { to: "/position", label: "Position", icon: ArrowLeftRight },
 ] as const;
 
+export function ChartNeedsBrowser() {
+  return (
+    <DeskShell>
+      <p className="max-w-xl text-sm text-muted">
+        This page is a chart. It does not send orders. The order book is Position, and that one runs on Lightsail.
+      </p>
+    </DeskShell>
+  );
+}
+
 export function DeskShell({ children }: { children: ReactNode }) {
   useAltEngine();
   const path = useRouterState({ select: (s) => s.location.pathname });

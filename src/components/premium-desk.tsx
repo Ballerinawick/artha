@@ -1,9 +1,8 @@
-import { Navigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
+import { ChartNeedsBrowser, DeskShell } from "@/components/desk-shell";
+import { WaveChart } from "@/components/tick-wave";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { DeskShell } from "@/components/desk-shell";
-import { WaveChart } from "@/components/tick-wave";
 import { holdLabel, livePnl, tradePnl, useJournal, type PremiumTrade } from "@/lib/dhan/journal";
 import { useDhanCreds } from "@/lib/dhan/session";
 import { usePremiumEngine, type EngineView } from "@/lib/dhan/use-premium-engine";
@@ -29,7 +28,7 @@ export function PremiumDesk() {
       </DeskShell>
     );
   }
-  if (!creds) return <Navigate to="/" />;
+  if (!creds) return <ChartNeedsBrowser />;
 
   const closed = trades.filter((trade) => trade.status === "closed");
   const net = closed.reduce((sum, trade) => sum + tradePnl(trade), 0);

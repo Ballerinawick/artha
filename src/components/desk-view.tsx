@@ -1,7 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { Navigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { DeskShell } from "@/components/desk-shell";
+import { ChartNeedsBrowser, DeskShell } from "@/components/desk-shell";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getDeskBook } from "@/lib/dhan/server";
@@ -38,7 +37,7 @@ export function DeskView() {
       </DeskShell>
     );
   }
-  if (!creds) return <Navigate to="/" />;
+  if (!creds) return <ChartNeedsBrowser />;
 
   const book = query.data;
   const openPnl = trades.filter((t) => t.status === "open" || t.status === "target").reduce((a, t) => a + paperPnl(t), 0);
