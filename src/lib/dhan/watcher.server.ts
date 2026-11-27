@@ -8,7 +8,7 @@ import { loadAltBook } from "./alt-load";
 import { sendOrder } from "./board";
 import { dhan, DhanError } from "./client";
 import { crossPnl, EMPTY_BOOK, markTrades, reduceAtm, type BookSnap, type CrossTrade, type WaveLeg } from "./cross-math";
-import { mintAccessToken, readDhanEnv, type DhanEnv } from "./dhan-auth.server";
+import { forgetAccessToken, mintAccessToken, readDhanEnv, type DhanEnv } from "./dhan-auth.server";
 import { gateOrder, intentIsFresh, liveOrdersEnabled, nextIntent, orderIntents, orderTag, signedNet, type OrderIntent } from "./live-sync";
 import { loadNiftyBook, type NiftyBook } from "./nifty";
 import { keepTwoDays } from "./session-api";
@@ -44,6 +44,7 @@ let started = false;
 let owns = false;
 let acceptOrders = false;
 let holdsLock = false;
+let brokerSynced = false;
 let note = "The phone is a mirror. The Mumbai login is not on this machine.";
 let phase: DeskPhase = "sleep";
 let niftyBook: BookSnap = freshBook();
@@ -123,6 +124,7 @@ export function startDesk() {
   started = true;
   owns = true;
   note = "Lightsail owns the book. The feed wakes at 09:08 IST. Live orders start at 09:15.";
+  console.log(`[desk] started. live orders ${liveOrdersEnabled() ? "ON (ARTHA_LIVE=1)" : "OFF"}`);
   void main(env);
 }
 
@@ -141,6 +143,7 @@ async function main(env: DhanEnv) {
     } catch (err) {
       acceptOrders = false;
       note = err instanceof Error ? err.message : "The Mumbai watcher stopped.";
+      console.error("[desk] session stopped:", note);
     }
     phase = deskPhase();
     if (phase === "shutdown" || phase === "sleep") continue;
@@ -170,9 +173,11 @@ async function runSession(env: DhanEnv) {
   niftyBook = nifty.book;
   if (bank) bankBook = bank.book;
   acceptOrders = false;
+  brokerSynced = false;
   if (liveOrdersEnabled() && holdsLock) {
     try {
       await syncBrokerTags(creds);
+      brokerSynced = true;
       acceptOrders = true;
       note = "Lightsail is live. Nifty and Bank Nifty market orders go out with the paper.";
     } catch {
@@ -185,6 +190,7 @@ async function runSession(env: DhanEnv) {
   } else {
     note = "Another Lightsail process holds the desk. This one will not send orders.";
   }
+  console.log(`[desk] session ready: ${note} (lock ${holdsLock ? "held" : "not held"})`);
   const runs = [nifty, bank].filter((run): run is Run => !!run);
   await feed(env, creds, runs);
   await flushTicks();
@@ -241,7 +247,9 @@ async function feed(env: DhanEnv, _creds: Creds, runs: Run[]) {
     const beat = setInterval(() => {
       void tryLock().then((ok) => {
         holdsLock = ok;
-        if (!ok) acceptOrders = false;
+        // One slow or failed heartbeat used to switch live orders off until the next
+        // session while the paper kept trading. Come back once the lock is held again.
+        acceptOrders = ok && brokerSynced && liveOrdersEnabled();
       });
     }, 10_000);
     const ticksFlush = setInterval(() => void flushTicks(), 250);
@@ -454,7 +462,15 @@ async function send(intent: OrderIntent, env: DhanEnv): Promise<"done" | "wait">
     return "done";
   }
   if (!ordersAllowed(deskPhase(), intent.side)) return "wait";
-  const token = await mintAccessToken(env);
+  let token: string;
+  try {
+    token = await mintAccessToken(env);
+  } catch (err) {
+    note = `${intent.symbol} ${intent.side} is waiting for a Dhan login. ${err instanceof Error ? err.message : ""}`.trim();
+    console.error("[desk] login before order failed:", note);
+    await sleep(5000);
+    return "wait";
+  }
   const creds = { clientId: env.clientId, accessToken: token };
   const known = fills.get(intent.tradeId) ?? {};
   const existingId = intent.side === "BUY" ? known.buyOrderId : known.sellOrderId;
@@ -519,6 +535,7 @@ async function send(intent: OrderIntent, env: DhanEnv): Promise<"done" | "wait">
     delete fill.error;
     fills.set(intent.tradeId, fill);
     note = `${intent.symbol} ${intent.side} market ${gate.qty} · ${res.orderId}`;
+    console.log("[desk] order sent:", tag, note);
     const state = await orderState(creds, res.orderId);
     if (state === "TRADED") {
       claimed.add(tag);
@@ -539,6 +556,8 @@ async function send(intent: OrderIntent, env: DhanEnv): Promise<"done" | "wait">
     fill.error = message;
     fills.set(intent.tradeId, fill);
     note = `${intent.symbol} ${intent.side} failed. ${message}`;
+    console.error("[desk] order failed:", tag, intent.symbol, intent.side, intent.securityId, gate.qty, err instanceof DhanError ? err.status : "", message);
+    if (err instanceof DhanError && err.status === 401) forgetAccessToken(token);
     try {
       const existing = await findOrder(creds, tag);
       if (existing) {
@@ -550,7 +569,7 @@ async function send(intent: OrderIntent, env: DhanEnv): Promise<"done" | "wait">
     } catch {
       /* the next pass reads the book again */
     }
-    const rejected = err instanceof DhanError && err.status >= 400 && err.status < 500 && err.status !== 429;
+    const rejected = err instanceof DhanError && err.status >= 400 && err.status < 500 && err.status !== 429 && err.status !== 401;
     if (rejected || (fill.tries ?? 0) >= 5) {
       claimed.add(tag);
       pending.delete(tag);
