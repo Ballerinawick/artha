@@ -2,30 +2,28 @@ import type { SessionState } from "./types";
 
 const IST = "Asia/Kolkata";
 
-export function istNow(date = new Date()): Date {
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: IST,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(date);
-  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "00";
-  return new Date(
-    Number(get("year")),
-    Number(get("month")) - 1,
-    Number(get("day")),
-    Number(get("hour")),
-    Number(get("minute")),
-    Number(get("second")),
-  );
+/** India has no daylight saving, so IST is always UTC+05:30. Plain arithmetic, no Intl.
+ *  Building an Intl.DateTimeFormat per call cost ~110 µs and ~20 KB of off-heap ICU memory;
+ *  the desk called this for every bar on every tick, which filled RAM and pinned the CPU. */
+const IST_OFFSET_MS = (5 * 60 + 30) * 60 * 1000;
+
+function shifted(date: Date): Date {
+  return new Date(date.getTime() + IST_OFFSET_MS);
 }
 
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : String(n);
+}
+
+export function istNow(date = new Date()): Date {
+  const d = shifted(date);
+  return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds());
+}
+
+let stampFormat: Intl.DateTimeFormat | null = null;
+
 export function formatIstStamp(date = new Date()): string {
-  return new Intl.DateTimeFormat("en-IN", {
+  stampFormat ??= new Intl.DateTimeFormat("en-IN", {
     timeZone: IST,
     day: "2-digit",
     month: "short",
@@ -33,24 +31,21 @@ export function formatIstStamp(date = new Date()): string {
     hour: "2-digit",
     minute: "2-digit",
     hourCycle: "h23",
-  }).format(date) + " IST";
+  });
+  return stampFormat.format(date) + " IST";
 }
 
 export function istDateKey(date = new Date()): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: IST,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(date);
+  const d = shifted(date);
+  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
 }
 
 export function istClock(date = new Date()): { date: string; minutes: number; weekday: number } {
-  const ist = istNow(date);
+  const d = shifted(date);
   return {
-    date: istDateKey(date),
-    minutes: ist.getHours() * 60 + ist.getMinutes(),
-    weekday: ist.getDay(),
+    date: `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`,
+    minutes: d.getUTCHours() * 60 + d.getUTCMinutes(),
+    weekday: d.getUTCDay(),
   };
 }
 
