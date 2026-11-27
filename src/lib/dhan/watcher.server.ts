@@ -8,8 +8,23 @@ import { loadAltBook } from "./alt-load";
 import { sendOrder } from "./board";
 import { dhan, DhanError } from "./client";
 import { crossPnl, EMPTY_BOOK, markTrades, reduceAtm, type BookSnap, type CrossTrade, type WaveLeg } from "./cross-math";
-import { mintAccessToken, readDhanEnv, type DhanEnv } from "./dhan-auth.server";
-import { gateOrder, intentIsFresh, liveOrdersEnabled, nextIntent, orderIntents, orderTag, signedNet, type OrderIntent } from "./live-sync";
+import { forgetAccessToken, mintAccessToken, readDhanEnv, type DhanEnv } from "./dhan-auth.server";
+import {
+  deskHoldings,
+  exitTag,
+  FRESH_MS,
+  gateOrder,
+  intentIsFresh,
+  liveOrdersEnabled,
+  nextIntent,
+  orderIntents,
+  orderTag,
+  planExits,
+  signedNet,
+  symbolOfIndex,
+  type BrokerOrder,
+  type OrderIntent,
+} from "./live-sync";
 import { loadNiftyBook, type NiftyBook } from "./nifty";
 import { keepTwoDays } from "./session-api";
 import { deskPhase, msUntilSession, ordersAllowed, SERVER_CUT, type DeskPhase } from "./session-clock";
@@ -28,7 +43,7 @@ type Run = {
   legs: Map<string, Leg>;
   book: BookSnap;
 };
-type Fill = { buyOrderId?: string; sellOrderId?: string; error?: string; tries?: number };
+type Fill = { buyOrderId?: string; sellOrderId?: string; error?: string; tries?: number; buyAt?: number; cancelAsked?: boolean };
 type Creds = { clientId: string; accessToken: string };
 
 const owner = randomUUID();
@@ -40,10 +55,34 @@ const flatWaits = new Map<string, number>();
 const watched = new Map<string, Set<string>>();
 const tickBuf: { day: string; t: number; securityId: string; kind: string; strike: number; ltp: number }[] = [];
 
+/** Exit sync: the broker is made to match the paper book (see reconcile()). */
+const STUCK_MS = 20_000;
+const SYNC_MS = 5000;
+let activeRuns: Run[] = [];
+const exitWork = new Map<string, { tag: string; orderId: string; sentAt: number; cancelAsked?: boolean }>();
+const exitRetryAt = new Map<string, number>();
+const warnedAt = new Map<string, number>();
+const staleLogged = new Set<string>();
+let reconcileBusy = false;
+let reconcileAgain = false;
+
+function flattenUnknown(): boolean {
+  return process.env.ARTHA_FLATTEN_UNKNOWN === "1";
+}
+
+/** Same warning at most once a minute per key. */
+function warnOnce(key: string, message: string) {
+  const now = Date.now();
+  if ((warnedAt.get(key) ?? 0) > now - 60_000) return;
+  warnedAt.set(key, now);
+  console.warn(message);
+}
+
 let started = false;
 let owns = false;
 let acceptOrders = false;
 let holdsLock = false;
+let brokerSynced = false;
 let note = "The phone is a mirror. The Mumbai login is not on this machine.";
 let phase: DeskPhase = "sleep";
 let niftyBook: BookSnap = freshBook();
@@ -66,7 +105,31 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export function deskSnapshot(): {
+type DeskSnap = {
+  owns: boolean;
+  note: string;
+  phase: DeskPhase;
+  live: boolean;
+  book: BookSnap;
+  expiry: string;
+  bank: BookSnap;
+  bankExpiry: string;
+  orders: Record<string, Fill>;
+};
+
+/** The build bundles this file twice (the Nitro plugin chunk and the SSR chunk the page calls).
+ *  Each copy has its own module state, so without this both started a desk in one process:
+ *  two Dhan logins, two feeds, two lock owners, and the page read the copy that was not trading.
+ *  The first copy to start registers here; every other copy only reads its snapshot. */
+const deskGlobal = globalThis as typeof globalThis & { __arthaDesk?: { snapshot: () => DeskSnap } };
+
+export function deskSnapshot(): DeskSnap {
+  const running = deskGlobal.__arthaDesk;
+  if (running && running.snapshot !== localSnapshot) return running.snapshot();
+  return localSnapshot();
+}
+
+function localSnapshot(): {
   owns: boolean;
   note: string;
   phase: DeskPhase;
@@ -92,12 +155,14 @@ export function deskSnapshot(): {
 }
 
 export function startDesk() {
-  if (started) return;
+  if (started || deskGlobal.__arthaDesk) return;
   const env = readDhanEnv();
   if (!env) return;
+  deskGlobal.__arthaDesk = { snapshot: localSnapshot };
   started = true;
   owns = true;
   note = "Lightsail owns the book. The feed wakes at 09:08 IST. Live orders start at 09:15.";
+  console.log(`[desk] started. live orders ${liveOrdersEnabled() ? "ON (ARTHA_LIVE=1)" : "OFF"}`);
   void main(env);
 }
 
@@ -116,6 +181,7 @@ async function main(env: DhanEnv) {
     } catch (err) {
       acceptOrders = false;
       note = err instanceof Error ? err.message : "The Mumbai watcher stopped.";
+      console.error("[desk] session stopped:", note);
     }
     phase = deskPhase();
     if (phase === "shutdown" || phase === "sleep") continue;
@@ -145,9 +211,11 @@ async function runSession(env: DhanEnv) {
   niftyBook = nifty.book;
   if (bank) bankBook = bank.book;
   acceptOrders = false;
+  brokerSynced = false;
   if (liveOrdersEnabled() && holdsLock) {
     try {
       await syncBrokerTags(creds);
+      brokerSynced = true;
       acceptOrders = true;
       note = "Lightsail is live. Nifty and Bank Nifty market orders go out with the paper.";
     } catch {
@@ -160,10 +228,33 @@ async function runSession(env: DhanEnv) {
   } else {
     note = "Another Lightsail process holds the desk. This one will not send orders.";
   }
+  console.log(`[desk] session ready: ${note} (lock ${holdsLock ? "held" : "not held"})`);
   const runs = [nifty, bank].filter((run): run is Run => !!run);
-  await feed(env, creds, runs);
+  activeRuns = runs;
+  for (const run of runs) {
+    const open = run.book.trades.find((trade) => trade.status === "open");
+    console.log(`[desk] ${run.symbol} lot ${run.lot}, expiry ${run.expiry}, paper open: ${open ? `${open.buy.type} ${open.buy.strike} (${open.buy.securityId})` : "none"}`);
+  }
+  // Startup reconcile: a desk position the restored paper book does not hold is closed; anything else is reported.
+  if (acceptOrders) void reconcile(env, "startup");
+  try {
+    await feed(env, creds, runs);
+  } finally {
+    activeRuns = [];
+  }
   await flushTicks();
   await persistBooks(runs);
+}
+
+async function trySync(env: DhanEnv): Promise<void> {
+  try {
+    const token = await mintAccessToken(env);
+    await syncBrokerTags({ clientId: env.clientId, accessToken: token });
+    brokerSynced = true;
+    console.log("[desk] broker order list read; live orders can go out.");
+  } catch (err) {
+    warnOnce("sync", `[desk] broker order list still unreadable: ${err instanceof Error ? err.message : err}`);
+  }
 }
 
 function seedRun(symbol: Run["symbol"], chain: NiftyBook): Run {
@@ -214,13 +305,22 @@ async function feed(env: DhanEnv, _creds: Creds, runs: Run[]) {
       if (phase === "shutdown" || phase === "sleep" || expired) finish();
     }, 500);
     const beat = setInterval(() => {
-      void tryLock().then((ok) => {
+      void tryLock().then(async (ok) => {
         holdsLock = ok;
-        if (!ok) acceptOrders = false;
+        if (ok && liveOrdersEnabled() && !brokerSynced) await trySync(env);
+        const was = acceptOrders;
+        // One slow or failed heartbeat used to switch live orders off until the next
+        // session while the paper kept trading. Come back once the lock is held again.
+        acceptOrders = holdsLock && brokerSynced && liveOrdersEnabled();
+        if (was !== acceptOrders) {
+          console.warn(`[desk] live orders ${acceptOrders ? "back ON" : "PAUSED (desk lock not held)"}`);
+          if (acceptOrders) void reconcile(env, "lock regained");
+        }
       });
     }, 10_000);
     const ticksFlush = setInterval(() => void flushTicks(), 250);
     const bookFlush = setInterval(() => void persistBooks(runs).catch(() => undefined), 2000);
+    const exitSync = setInterval(() => void reconcile(env, "timer"), SYNC_MS);
     const finish = () => {
       if (stopped) return;
       stopped = true;
@@ -228,6 +328,7 @@ async function feed(env: DhanEnv, _creds: Creds, runs: Run[]) {
       clearInterval(beat);
       clearInterval(ticksFlush);
       clearInterval(bookFlush);
+      clearInterval(exitSync);
       if (reconnect) clearTimeout(reconnect);
       socket?.close();
       resolve();
@@ -353,29 +454,47 @@ function step(run: Run, nowPhase: DeskPhase, env: DhanEnv) {
   let next = reduceAtm(base, [...run.legs.values()], run.lot, run.expiry, anchor, now, SERVER_CUT);
   if (nowPhase === "flatten") next = clampFlat(next, priceOf, now);
   const raw = orderIntents(run.book, next, run.symbol);
-  const buys = raw.filter((intent) => {
-    if (!ordersAllowed(nowPhase, "BUY")) return false;
+  const buys: OrderIntent[] = [];
+  for (const intent of raw) {
+    if (intent.side !== "BUY") continue;
     const trade = next.trades.find((row) => row.id === intent.tradeId);
-    return !!trade && intent.side === "BUY" && intentIsFresh(trade, "BUY", now);
-  });
-  const buyIds = new Set(buys.map((intent) => intent.tradeId));
-  const sells = raw.filter((intent) => {
-    if (intent.side !== "SELL" || !ordersAllowed(nowPhase, "SELL")) return false;
+    if (!trade) continue;
+    const label = `${run.symbol} ${trade.buy.type} ${trade.buy.strike} (${trade.buy.securityId}) x${intent.qty}`;
+    if (!ordersAllowed(nowPhase, "BUY")) {
+      console.log(`[desk] paper entry ${label}: no live buy, entries are closed in phase ${nowPhase}`);
+      continue;
+    }
+    if (!intentIsFresh(trade, "BUY", now)) {
+      // A late entry is not chased: the price the paper used is gone. Logged so it is not silent.
+      if (!staleLogged.has(trade.id)) {
+        staleLogged.add(trade.id);
+        console.warn(`[desk] paper entry ${label} is ${Math.round((now - trade.entryTs) / 1000)}s old (> ${FRESH_MS / 1000}s); live buy skipped`);
+      }
+      continue;
+    }
+    console.log(`[desk] paper entry ${label} -> live BUY`);
+    buys.push(intent);
+  }
+  // Exits are not sent from the paper diff any more. Any paper exit (turned, flipped, 15:20 flat) just
+  // triggers reconcile(), which sells whatever the desk holds that no open paper holds. That also covers
+  // exits seen late, exits while orders were paused, restarts, and a buy that fills after its paper closed.
+  const exits = raw.filter((intent) => intent.side === "SELL");
+  for (const intent of exits) {
     const trade = next.trades.find((row) => row.id === intent.tradeId);
-    if (!trade || !intentIsFresh(trade, "SELL", now)) return false;
-    const buyTag = orderTag(intent.tradeId, "BUY");
-    if (liveOrdersEnabled() && !claimed.has(buyTag) && !pending.has(buyTag) && !buyIds.has(intent.tradeId)) return false;
-    return true;
-  });
-  const intents = [...buys, ...sells];
+    console.log(`[desk] paper exit ${run.symbol} ${trade?.buy.type ?? ""} ${trade?.buy.strike ?? ""} (${intent.securityId}) ${trade?.exitWhy ?? ""} -> live SELL sync`);
+  }
   run.book = next;
-  if (!acceptOrders || !holdsLock) return;
-  for (const intent of intents) {
+  if (!acceptOrders || !holdsLock) {
+    if (raw.length) console.warn(`[desk] ${run.symbol} paper changed but live orders are paused (lock ${holdsLock ? "held" : "not held"}, live ${liveOrdersEnabled() ? "on" : "off"}); exits are synced when they resume`);
+    return;
+  }
+  for (const intent of buys) {
     watchId(intent.symbol, intent.securityId);
     const tag = orderTag(intent.tradeId, intent.side);
     if (!claimed.has(tag)) pending.set(tag, intent);
   }
   if (pending.size) void drain(run.symbol, env);
+  if (exits.length) void reconcile(env, `paper exit ${run.symbol}`);
 }
 
 function clampFlat(book: BookSnap, priceOf: (id: string) => number | undefined, now: number): BookSnap {
@@ -429,7 +548,23 @@ async function send(intent: OrderIntent, env: DhanEnv): Promise<"done" | "wait">
     return "done";
   }
   if (!ordersAllowed(deskPhase(), intent.side)) return "wait";
-  const token = await mintAccessToken(env);
+  if (intent.side === "BUY" && intent.ts && Date.now() - intent.ts > FRESH_MS && !fills.get(intent.tradeId)?.buyOrderId) {
+    // Waited too long (open lot not flat yet, login, a cancelled stuck order): do not chase the entry.
+    claimed.add(tag);
+    pending.delete(tag);
+    note = `${intent.symbol} entry window passed; the live buy was not sent.`;
+    console.warn(`[desk] ${intent.symbol} BUY ${intent.securityId} dropped: entry is older than ${FRESH_MS / 1000}s`);
+    return "done";
+  }
+  let token: string;
+  try {
+    token = await mintAccessToken(env);
+  } catch (err) {
+    note = `${intent.symbol} ${intent.side} is waiting for a Dhan login. ${err instanceof Error ? err.message : ""}`.trim();
+    console.error("[desk] login before order failed:", note);
+    await sleep(5000);
+    return "wait";
+  }
   const creds = { clientId: env.clientId, accessToken: token };
   const known = fills.get(intent.tradeId) ?? {};
   const existingId = intent.side === "BUY" ? known.buyOrderId : known.sellOrderId;
@@ -440,14 +575,38 @@ async function send(intent: OrderIntent, env: DhanEnv): Promise<"done" | "wait">
       pending.delete(tag);
       flatWaits.delete(tag);
       void remember(tag, intent, existingId);
+      console.log(`[desk] ${intent.symbol} ${intent.side} ${intent.securityId} filled · ${existingId}`);
+      void reconcile(env, "entry filled");
       return "done";
     }
     if (state === "REJECTED" || state === "CANCELLED" || state === "EXPIRED") {
+      console.warn(`[desk] ${intent.symbol} ${intent.side} ${intent.securityId} ${state} at Dhan · ${existingId}`);
+      const weCancelled = !!known.cancelAsked;
       if (intent.side === "BUY") known.buyOrderId = undefined;
       else known.sellOrderId = undefined;
+      known.cancelAsked = false;
       fills.set(intent.tradeId, known);
+      // A rejected entry is not retried, and an entry we cancelled for sitting unfilled is not chased.
+      // Any part that did fill is a desk position, so reconcile() sells it with the paper exit.
+      if (intent.side === "BUY" && (state === "REJECTED" || weCancelled)) {
+        claimed.add(tag);
+        pending.delete(tag);
+        return "done";
+      }
     } else {
-      note = `${intent.symbol} ${intent.side} is still working at Dhan. The next lot waits.`;
+      // Dhan turns API market orders into limit orders with price protection, so one can sit unfilled.
+      // After STUCK_MS it is cancelled; a fresh entry is re-sent once, a stale one is dropped above.
+      if (!known.cancelAsked && known.buyAt && Date.now() - known.buyAt > STUCK_MS) {
+        known.cancelAsked = true;
+        fills.set(intent.tradeId, known);
+        try {
+          await cancelOrder(creds, existingId);
+          console.warn(`[desk] ${intent.symbol} ${intent.side} ${intent.securityId} unfilled after ${STUCK_MS / 1000}s (${state || "unknown"}); cancel sent · ${existingId}`);
+        } catch (err) {
+          console.error(`[desk] cancel of ${existingId} failed: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+      note = `${intent.symbol} ${intent.side} is still working at Dhan (${state || "status unknown"}).`;
       return "wait";
     }
   }
@@ -489,17 +648,23 @@ async function send(intent: OrderIntent, env: DhanEnv): Promise<"done" | "wait">
       correlationId: tag,
     });
     const fill = fills.get(intent.tradeId) ?? {};
-    if (intent.side === "BUY") fill.buyOrderId = res.orderId;
-    else fill.sellOrderId = res.orderId;
+    if (intent.side === "BUY") {
+      fill.buyOrderId = res.orderId;
+      fill.buyAt = Date.now();
+      fill.cancelAsked = false;
+    } else fill.sellOrderId = res.orderId;
     delete fill.error;
     fills.set(intent.tradeId, fill);
     note = `${intent.symbol} ${intent.side} market ${gate.qty} · ${res.orderId}`;
+    console.log("[desk] order sent:", tag, note);
     const state = await orderState(creds, res.orderId);
     if (state === "TRADED") {
       claimed.add(tag);
       pending.delete(tag);
       flatWaits.delete(tag);
       void remember(tag, { ...intent, qty: gate.qty }, res.orderId);
+      console.log(`[desk] ${intent.symbol} ${intent.side} ${intent.securityId} filled · ${res.orderId}`);
+      void reconcile(env, "entry filled");
       return "done";
     }
     if (state === "REJECTED" || state === "CANCELLED" || state === "EXPIRED") {
@@ -514,6 +679,8 @@ async function send(intent: OrderIntent, env: DhanEnv): Promise<"done" | "wait">
     fill.error = message;
     fills.set(intent.tradeId, fill);
     note = `${intent.symbol} ${intent.side} failed. ${message}`;
+    console.error("[desk] order failed:", tag, intent.symbol, intent.side, intent.securityId, gate.qty, err instanceof DhanError ? err.status : "", message);
+    if (err instanceof DhanError && err.status === 401) forgetAccessToken(token);
     try {
       const existing = await findOrder(creds, tag);
       if (existing) {
@@ -525,7 +692,7 @@ async function send(intent: OrderIntent, env: DhanEnv): Promise<"done" | "wait">
     } catch {
       /* the next pass reads the book again */
     }
-    const rejected = err instanceof DhanError && err.status >= 400 && err.status < 500 && err.status !== 429;
+    const rejected = err instanceof DhanError && err.status >= 400 && err.status < 500 && err.status !== 429 && err.status !== 401;
     if (rejected || (fill.tries ?? 0) >= 5) {
       claimed.add(tag);
       pending.delete(tag);
@@ -534,32 +701,179 @@ async function send(intent: OrderIntent, env: DhanEnv): Promise<"done" | "wait">
   }
 }
 
-async function indexNets(creds: Creds, symbol: OrderIntent["symbol"]): Promise<{ securityId: string; netQty: number }[]> {
+async function brokerPositions(creds: Creds): Promise<Record<string, unknown>[]> {
   const body = await dhan<unknown>(creds, "/positions");
   const rows = Array.isArray(body) ? body : ((body as { data?: unknown }).data ?? []);
   if (!Array.isArray(rows)) throw new Error("Dhan positions were not readable.");
+  return rows.filter((row): row is Record<string, unknown> => !!row && typeof row === "object");
+}
+
+/** Open NSE_FNO intraday nets of one index. Exact index name, plus any contract this desk traded. */
+function netsFor(rows: Record<string, unknown>[], symbol: OrderIntent["symbol"]): { securityId: string; netQty: number }[] {
   const nets: { securityId: string; netQty: number }[] = [];
-  for (const row of rows) {
-    if (!row || typeof row !== "object") continue;
-    const rec = row as {
-      securityId?: string | number;
-      tradingSymbol?: string;
-      exchangeSegment?: string;
-      productType?: string;
-      positionType?: string;
-      netQty?: number;
-    };
+  for (const rec of rows) {
     if (String(rec.exchangeSegment ?? "") !== "NSE_FNO") continue;
     if (String(rec.productType ?? "") !== "INTRADAY") continue;
-    const name = String(rec.tradingSymbol ?? "").toUpperCase();
     const id = String(rec.securityId ?? "");
-    const named = symbol === "BANKNIFTY" ? name.startsWith("BANKNIFTY") : name.startsWith("NIFTY") && !name.startsWith("BANKNIFTY");
-    if (!named && !(watched.get(symbol)?.has(id))) continue;
+    const named = symbolOfIndex(symbol, String(rec.tradingSymbol ?? ""));
+    if (!named && !watched.get(symbol)?.has(id)) continue;
     const netQty = signedNet(String(rec.positionType ?? ""), Number(rec.netQty) || 0);
     if (netQty === 0) continue;
-    nets.push({ securityId: String(rec.securityId ?? ""), netQty });
+    nets.push({ securityId: id, netQty });
   }
   return nets;
+}
+
+async function indexNets(creds: Creds, symbol: OrderIntent["symbol"]): Promise<{ securityId: string; netQty: number }[]> {
+  return netsFor(await brokerPositions(creds), symbol);
+}
+
+async function brokerOrders(creds: Creds): Promise<BrokerOrder[]> {
+  const body = await dhan<unknown>(creds, "/orders");
+  const rows = Array.isArray(body) ? body : ((body as { data?: unknown }).data ?? []);
+  if (!Array.isArray(rows)) throw new Error("Dhan order list was not readable.");
+  return rows as BrokerOrder[];
+}
+
+async function cancelOrder(creds: Creds, orderId: string): Promise<void> {
+  await dhan<unknown>(creds, `/orders/${encodeURIComponent(orderId)}`, { method: "DELETE" });
+}
+
+/**
+ * Make the broker match the paper book, for both indices. Runs on every paper exit, after every entry
+ * fill, at startup, when orders resume, and every SYNC_MS as a safety net.
+ * Sells only what this desk bought (from today's Dhan order book) and only while no open paper holds it.
+ * From 15:20 (flatten) every desk position is sold whatever the paper says.
+ */
+async function reconcile(env: DhanEnv, why: string): Promise<void> {
+  if (reconcileBusy) {
+    reconcileAgain = true;
+    return;
+  }
+  reconcileBusy = true;
+  try {
+    do {
+      reconcileAgain = false;
+      await reconcileOnce(env, why);
+    } while (reconcileAgain);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (err instanceof DhanError && err.status === 401) forgetAccessToken();
+    warnOnce(`reconcile:${message}`, `[desk] exit sync failed (${why}): ${message}`);
+  } finally {
+    reconcileBusy = false;
+  }
+}
+
+async function reconcileOnce(env: DhanEnv, why: string): Promise<void> {
+  if (!liveOrdersEnabled() || !acceptOrders || !holdsLock || !activeRuns.length) return;
+  const phaseNow = deskPhase();
+  if (!ordersAllowed(phaseNow, "SELL")) return;
+  const token = await mintAccessToken(env);
+  const creds = { clientId: env.clientId, accessToken: token };
+  const [orders, rows] = await Promise.all([brokerOrders(creds), brokerPositions(creds)]);
+  const desk = deskHoldings(orders);
+  const touched = new Set<string>();
+  for (const run of activeRuns) {
+    const nets = netsFor(rows, run.symbol);
+    const held = new Set<string>();
+    if (phaseNow !== "flatten") {
+      for (const trade of run.book.trades) if (trade.status === "open") held.add(trade.buy.securityId);
+    }
+    const plan = planExits({ nets, desk, held, flattenUnknown: phaseNow === "flatten" && flattenUnknown() });
+    for (const row of plan.unknown) {
+      warnOnce(
+        `unknown:${row.securityId}`,
+        `[desk] ${run.symbol} long ${row.netQty} in ${row.securityId} was not opened by this desk; left alone` +
+          ` (it blocks new ${run.symbol} entries; set ARTHA_FLATTEN_UNKNOWN=1 to sell it at 15:20)`,
+      );
+    }
+    for (const row of plan.shorts) {
+      warnOnce(`short:${row.securityId}`, `[desk] ${run.symbol} short ${row.netQty} in ${row.securityId}; this desk never sells short and leaves it alone`);
+    }
+    for (const sell of plan.sells) {
+      touched.add(sell.securityId);
+      await exitPosition(creds, run, sell, why);
+    }
+  }
+  // Exit orders whose position is already flat: confirm the fill and clear them.
+  for (const [id, work] of exitWork) {
+    if (touched.has(id)) continue;
+    const state = await orderState(creds, work.orderId);
+    if (state === "TRADED" || state === "REJECTED" || state === "CANCELLED" || state === "EXPIRED") {
+      exitWork.delete(id);
+      console.log(`[desk] exit ${id} ${state === "TRADED" ? "filled" : state} · ${work.orderId}`);
+    }
+  }
+}
+
+async function exitPosition(
+  creds: Creds,
+  run: Run,
+  sell: { securityId: string; qty: number; why: string },
+  why: string,
+): Promise<void> {
+  const id = sell.securityId;
+  const now = Date.now();
+  const work = exitWork.get(id);
+  if (work) {
+    const state = await orderState(creds, work.orderId);
+    if (state === "TRADED") {
+      exitWork.delete(id);
+      exitRetryAt.set(id, now + 4000); // let the position book catch up before another look
+      console.log(`[desk] ${run.symbol} exit ${id} filled · ${work.orderId}`);
+      return;
+    }
+    if (state === "REJECTED" || state === "CANCELLED" || state === "EXPIRED") {
+      exitWork.delete(id);
+      if (state === "REJECTED") exitRetryAt.set(id, now + 30_000);
+      console.warn(`[desk] ${run.symbol} exit ${id} ${state} at Dhan · ${work.orderId}; ${state === "REJECTED" ? "retry in 30s" : "re-sending"}`);
+      if (state === "REJECTED") return;
+    } else {
+      if (!work.cancelAsked && now - work.sentAt > STUCK_MS) {
+        work.cancelAsked = true;
+        try {
+          await cancelOrder(creds, work.orderId);
+          console.warn(`[desk] ${run.symbol} exit ${id} unfilled after ${STUCK_MS / 1000}s (${state || "unknown"}); cancelled to re-send at a fresh price · ${work.orderId}`);
+        } catch (err) {
+          console.error(`[desk] cancel of exit ${work.orderId} failed: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+      return;
+    }
+  }
+  if ((exitRetryAt.get(id) ?? 0) > now) return;
+  const tag = exitTag(id, now);
+  try {
+    const res = await sendOrder(creds, { securityId: id, segment: "NSE_FNO", side: "SELL", qty: sell.qty, symbol: run.symbol, correlationId: tag });
+    exitWork.set(id, { tag, orderId: res.orderId, sentAt: now });
+    watchId(run.symbol, id);
+    note = `${run.symbol} SELL market ${sell.qty} · ${res.orderId}`;
+    console.log(`[desk] ${run.symbol} exit SELL ${id} x${sell.qty} sent (${sell.why}; ${why}) · ${res.orderId}`);
+    const closed = run.book.trades.find((trade) => trade.status === "closed" && trade.buy.securityId === id);
+    if (closed) {
+      const fill = fills.get(closed.id) ?? {};
+      fill.sellOrderId = res.orderId;
+      fills.set(closed.id, fill);
+    }
+    void remember(tag, { tradeId: closed?.id ?? `exit:${id}`, side: "SELL", securityId: id, qty: sell.qty, symbol: run.symbol }, res.orderId);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const status = err instanceof DhanError ? err.status : 0;
+    console.error(`[desk] ${run.symbol} exit SELL ${id} x${sell.qty} failed (${status || "network"}): ${message}`);
+    note = `${run.symbol} exit failed. ${message}`;
+    if (status === 401) forgetAccessToken(creds.accessToken);
+    try {
+      const existing = await findOrder(creds, tag);
+      if (existing) {
+        exitWork.set(id, { tag, orderId: existing, sentAt: now });
+        return;
+      }
+    } catch {
+      /* next pass reads the order book again */
+    }
+    exitRetryAt.set(id, now + (status >= 400 && status < 500 && status !== 429 && status !== 401 ? 30_000 : 5000));
+  }
 }
 
 async function orderState(creds: Creds, orderId: string): Promise<string> {
@@ -690,7 +1004,7 @@ async function flushTicks() {
   }
 }
 
-let savedMinute = new Set<string>();
+const savedMinute = new Set<string>();
 let lastTrim = 0;
 
 async function persistBooks(runs: Run[]) {

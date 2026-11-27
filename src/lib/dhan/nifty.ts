@@ -92,20 +92,22 @@ function istStamp(d: Date, withTime: boolean): string {
   }).format(d)}`;
 }
 
-async function nearestFuture(): Promise<OptContract> {
+/** Front Nifty future, with its lot size from the scrip file (SEM_LOT_UNITS) so a lot revision is picked up. */
+async function nearestFuture(): Promise<OptContract & { lot: number }> {
   const today = istStamp(new Date(), false);
-  return cachedStale(`nifty-fut-front:${today}`, 60 * 60 * 1000, async () => {
-    let best: { id: string; expiry: string } | null = null;
+  return cachedStale(`nifty-fut-front:v2:${today}`, 60 * 60 * 1000, async () => {
+    let best = null as { id: string; expiry: string; lot: number } | null;
     await readScrip((col, header) => {
       const symbol = col[header.indexOf("SEM_TRADING_SYMBOL")] ?? "";
       if (!/^NIFTY-[A-Za-z]{3}\d{4}-FUT$/.test(symbol)) return;
       const expiry = (col[header.indexOf("SEM_EXPIRY_DATE")] ?? "").slice(0, 10);
       const id = col[header.indexOf("SEM_SMST_SECURITY_ID")] ?? "";
+      const lot = Math.round(Number(col[header.indexOf("SEM_LOT_UNITS")] ?? 0));
       if (!/^\d+$/.test(id) || expiry < today) return;
-      if (!best || expiry < best.expiry) best = { id, expiry };
+      if (!best || expiry < best.expiry) best = { id, expiry, lot: lot > 0 ? lot : 0 };
     });
     if (!best) throw new Error("No live Nifty future contract was found.");
-    return { securityId: best.id, strike: 0, ltp: 0, type: "FUT", why: best.expiry };
+    return { securityId: best.id, strike: 0, ltp: 0, type: "FUT", why: best.expiry, lot: best.lot };
   });
 }
 
@@ -257,10 +259,10 @@ async function fetchNiftyBook(creds: DhanCreds): Promise<NiftyBook> {
   return {
     expiry,
     spot,
-    lot: LOTS.NIFTY ?? 65,
+    lot: future.lot > 0 ? future.lot : (LOTS.NIFTY ?? 65),
     ce,
     pe,
-    future,
+    future: { securityId: future.securityId, strike: future.strike, ltp: future.ltp, type: future.type, why: future.why },
     ladder,
     chain,
     history: {

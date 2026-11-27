@@ -1,3 +1,4 @@
+import { istClock } from "../market/hours.ts";
 export type Bar = { t: number; o: number; h: number; l: number; c: number; v: number };
 
 export type Check = { name: string; pass: boolean; detail: string };
@@ -15,23 +16,10 @@ export type Setup = {
   sessionDate: string;
 };
 
-const IST = "Asia/Kolkata";
-
 export function istParts(epochMs: number) {
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: IST,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(new Date(epochMs));
-  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "00";
-  return {
-    date: `${get("year")}-${get("month")}-${get("day")}`,
-    minutes: Number(get("hour")) * 60 + Number(get("minute")),
-  };
+  // Per-bar call: plain IST arithmetic, not a new Intl.DateTimeFormat each time.
+  const { date, minutes } = istClock(new Date(epochMs));
+  return { date, minutes };
 }
 
 function ema(values: number[], period: number): number | null {

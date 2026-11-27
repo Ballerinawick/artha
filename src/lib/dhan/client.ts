@@ -24,7 +24,7 @@ function cleanMessage(status: number, body: string): string {
 export async function dhan<T>(
   creds: { clientId: string; accessToken: string },
   path: string,
-  init?: { method?: "GET" | "POST"; body?: unknown; retry429?: boolean },
+  init?: { method?: "GET" | "POST" | "DELETE"; body?: unknown; retry429?: boolean },
 ): Promise<T> {
   const attempts = init?.retry429 ? 2 : 1;
   let last: DhanError | null = null;

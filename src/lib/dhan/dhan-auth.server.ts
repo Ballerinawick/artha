@@ -10,9 +10,24 @@ export type DhanEnv = {
 
 type CachedToken = { fingerprint: string; token: string; expiresAt: number };
 
-let cachedToken: CachedToken | null = null;
-let pendingToken: { fingerprint: string; promise: Promise<string> } | null = null;
-let loginNotBefore = 0;
+/** One token cache per process. This module is bundled into more than one chunk, and a second
+ *  copy minting its own token (Dhan allows one every 2 minutes, and a new one can end the last)
+ *  broke the desk's orders and feed. */
+type AuthState = {
+  cachedToken: CachedToken | null;
+  pendingToken: { fingerprint: string; promise: Promise<string> } | null;
+  loginNotBefore: number;
+};
+const auth: AuthState = ((globalThis as typeof globalThis & { __arthaDhanAuth?: AuthState }).__arthaDhanAuth ??= {
+  cachedToken: null,
+  pendingToken: null,
+  loginNotBefore: 0,
+});
+
+/** Drop the cached token after Dhan refuses it, so the next call logs in again. */
+export function forgetAccessToken(token?: string): void {
+  if (!token || auth.cachedToken?.token === token) auth.cachedToken = null;
+}
 
 /** Present only when the machine has its own Dhan login. Nothing here is read from the page. */
 export function readDhanEnv(): DhanEnv | null {
@@ -42,25 +57,25 @@ export async function mintAccessToken(env: DhanEnv): Promise<string> {
   const fingerprint = createHash("sha256")
     .update([env.clientId, env.apiKey, env.apiSecret, env.pin, env.totpSecret].join("\0"))
     .digest("hex");
-  if (cachedToken?.fingerprint === fingerprint && cachedToken.expiresAt > Date.now()) {
-    return cachedToken.token;
+  if (auth.cachedToken?.fingerprint === fingerprint && auth.cachedToken.expiresAt > Date.now()) {
+    return auth.cachedToken.token;
   }
-  if (Date.now() < loginNotBefore) {
+  if (Date.now() < auth.loginNotBefore) {
     throw new Error("Dhan login failed. Token can be generated once every 2 minutes.");
   }
-  if (pendingToken?.fingerprint === fingerprint) return pendingToken.promise;
+  if (auth.pendingToken?.fingerprint === fingerprint) return auth.pendingToken.promise;
 
   const promise = requestAccessToken(env)
     .then((token) => {
-      if (pendingToken?.promise === promise) {
-        cachedToken = { fingerprint, token, expiresAt: tokenExpiry(token) };
+      if (auth.pendingToken?.promise === promise) {
+        auth.cachedToken = { fingerprint, token, expiresAt: tokenExpiry(token) };
       }
       return token;
     })
     .finally(() => {
-      if (pendingToken?.promise === promise) pendingToken = null;
+      if (auth.pendingToken?.promise === promise) auth.pendingToken = null;
     });
-  pendingToken = { fingerprint, promise };
+  auth.pendingToken = { fingerprint, promise };
   return promise;
 }
 
@@ -71,7 +86,7 @@ async function requestAccessToken(env: DhanEnv): Promise<string> {
   const text = await response.text();
   if (!response.ok) {
     const detail = text.replace(/\s+/g, " ").slice(0, 160);
-    if (/2 minutes|too many|attempt/i.test(detail)) loginNotBefore = Date.now() + 130_000;
+    if (/2 minutes|too many|attempt/i.test(detail)) auth.loginNotBefore = Date.now() + 130_000;
     throw new Error(`Dhan login failed (${response.status}). ${detail}`.trim());
   }
   let token = "";
