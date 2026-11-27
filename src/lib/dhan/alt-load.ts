@@ -66,7 +66,7 @@ async function frontFuture(spec: AltSpec): Promise<{ securityId: string; expiry:
       if (!spec.fut.test(symbol)) return;
       const expiry = (col[header.indexOf("SEM_EXPIRY_DATE")] ?? "").slice(0, 10);
       const securityId = col[header.indexOf("SEM_SMST_SECURITY_ID")] ?? "";
-      const lot = Number(col[header.indexOf("SEM_LOT_UNITS")] ?? 0);
+      const lot = Math.round(Number(col[header.indexOf("SEM_LOT_UNITS")] ?? 0));
       if (!/^\d+$/.test(securityId) || expiry < today) return;
       if (!best || expiry < best.expiry) best = { securityId, expiry, lot: lot > 0 ? lot : (LOTS[spec.symbol] ?? 0) };
     });

@@ -1,7 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EMPTY_BOOK, type BookSnap, type CrossTrade } from "./cross-math.ts";
-import { gateOrder, nextIntent, orderIntents, orderTag, intentIsFresh, signedNet, type OrderIntent } from "./live-sync.ts";
+import {
+  deskHoldings,
+  exitTag,
+  gateOrder,
+  intentIsFresh,
+  isDeskTag,
+  nextIntent,
+  orderIntents,
+  orderTag,
+  planExits,
+  signedNet,
+  symbolOfIndex,
+  type OrderIntent,
+ } from "./live-sync.ts";
 
 function trade(id: string, status: "open" | "closed"): CrossTrade {
   return {
@@ -89,4 +102,84 @@ test("the old ATM is sold before the new buy, and a same-trade round trip buys f
   assert.equal(nextIntent([buy("same"), sell("same")], true, true)?.side, "BUY");
   assert.equal(nextIntent([sell("same")], true, true)?.side, "SELL");
   assert.equal(nextIntent([buy("new")], false, true), null);
+});
+
+test("index names match exactly: NIFTY is not NIFTYNXT50, FINNIFTY or BANKNIFTY", () => {
+  assert.equal(symbolOfIndex("NIFTY", "NIFTY-Dec2026-24000-CE"), true);
+  assert.equal(symbolOfIndex("NIFTY", "NIFTY 30 DEC 24000 CALL"), true);
+  assert.equal(symbolOfIndex("NIFTY", "NIFTYNXT50-Dec2026-70000-CE"), false);
+  assert.equal(symbolOfIndex("NIFTY", "BANKNIFTY-Dec2026-63500-CE"), false);
+  assert.equal(symbolOfIndex("NIFTY", "FINNIFTY-Dec2026-27000-PE"), false);
+  assert.equal(symbolOfIndex("BANKNIFTY", "BANKNIFTY 29 DEC 63500 CALL"), true);
+  assert.equal(symbolOfIndex("BANKNIFTY", "BANKNIFTYX-Dec2026-1-CE"), false);
+});
+
+test("desk tags are recognised, manual orders are not", () => {
+  assert.equal(isDeskTag(orderTag("t1", "BUY")), true);
+  assert.equal(isDeskTag(orderTag("t1", "SELL")), true);
+  assert.equal(isDeskTag(exitTag("58872", 1)), true);
+  assert.equal(isDeskTag(""), false);
+  assert.equal(isDeskTag("artha1764230000000"), false);
+});
+
+test("desk holdings come from filled desk orders only", () => {
+  const held = deskHoldings([
+    { correlationId: orderTag("t1", "BUY"), transactionType: "BUY", securityId: 111, orderStatus: "TRADED", filledQty: 30, quantity: 30 },
+    { correlationId: exitTag("111", 5), transactionType: "SELL", securityId: "111", orderStatus: "PART_TRADED", filledQty: 10, quantity: 30 },
+    { correlationId: orderTag("t2", "BUY"), transactionType: "BUY", securityId: "222", orderStatus: "REJECTED", filledQty: 0, quantity: 65 },
+    { correlationId: "", transactionType: "BUY", securityId: "333", orderStatus: "TRADED", filledQty: 65, quantity: 65 },
+    { correlationId: orderTag("t3", "BUY"), transactionType: "BUY", securityId: "444", orderStatus: "TRADED", quantity: 65 },
+  ]);
+  assert.equal(held.get("111"), 20);
+  assert.equal(held.has("222"), false);
+  assert.equal(held.has("333"), false);
+  assert.equal(held.get("444"), 65);
+});
+
+test("a desk long that no open paper holds is sold, a held one is kept", () => {
+  const desk = new Map([["111", 30], ["222", 65]]);
+  const plan = planExits({
+    nets: [{ securityId: "111", netQty: 30 }, { securityId: "222", netQty: 65 }],
+    desk,
+    held: new Set(["222"]),
+    flattenUnknown: false,
+  });
+  assert.deepEqual(plan.sells, [{ securityId: "111", qty: 30, why: "desk" }]);
+  assert.deepEqual(plan.unknown, []);
+});
+
+test("a manual long is reported, never sold, unless flattening unknowns is switched on", () => {
+  const nets = [{ securityId: "555", netQty: 30 }];
+  const off = planExits({ nets, desk: new Map(), held: new Set(), flattenUnknown: false });
+  assert.deepEqual(off.sells, []);
+  assert.deepEqual(off.unknown, [{ securityId: "555", netQty: 30 }]);
+  const on = planExits({ nets, desk: new Map(), held: new Set(), flattenUnknown: true });
+  assert.deepEqual(on.sells, [{ securityId: "555", qty: 30, why: "flatten-unknown" }]);
+});
+
+test("the desk sells only its own part of a mixed lot and never more than the broker long", () => {
+  const mixed = planExits({ nets: [{ securityId: "111", netQty: 60 }], desk: new Map([["111", 30]]), held: new Set(), flattenUnknown: false });
+  assert.deepEqual(mixed.sells, [{ securityId: "111", qty: 30, why: "desk" }]);
+  assert.deepEqual(mixed.unknown, [{ securityId: "111", netQty: 30 }]);
+  const small = planExits({ nets: [{ securityId: "111", netQty: 10 }], desk: new Map([["111", 30]]), held: new Set(), flattenUnknown: false });
+  assert.deepEqual(small.sells, [{ securityId: "111", qty: 10, why: "desk" }]);
+});
+
+test("shorts are never bought back or added to", () => {
+  const plan = planExits({ nets: [{ securityId: "111", netQty: -30 }], desk: new Map([["111", 30]]), held: new Set(), flattenUnknown: true });
+  assert.deepEqual(plan.sells, []);
+  assert.deepEqual(plan.shorts, [{ securityId: "111", netQty: -30 }]);
+});
+
+test("an exit after a restart: desk bought, paper book lost, the long is closed", () => {
+  const orders = [{ correlationId: orderTag("lost", "BUY"), transactionType: "BUY", securityId: "58872", orderStatus: "TRADED", filledQty: 30 }];
+  const plan = planExits({ nets: [{ securityId: "58872", netQty: 30 }], desk: deskHoldings(orders), held: new Set(), flattenUnknown: false });
+  assert.deepEqual(plan.sells, [{ securityId: "58872", qty: 30, why: "desk" }]);
+});
+
+test("intents carry the paper time of their side", () => {
+  const open = { ...trade("a", "open"), entryTs: 1000 };
+  const closed = { ...open, status: "closed" as const, exitTs: 5000 };
+  assert.equal(orderIntents(EMPTY_BOOK, book([open]), "NIFTY")[0]?.ts, 1000);
+  assert.equal(orderIntents(book([open]), book([closed]), "NIFTY")[0]?.ts, 5000);
 });
