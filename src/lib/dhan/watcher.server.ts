@@ -66,7 +66,31 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export function deskSnapshot(): {
+type DeskSnap = {
+  owns: boolean;
+  note: string;
+  phase: DeskPhase;
+  live: boolean;
+  book: BookSnap;
+  expiry: string;
+  bank: BookSnap;
+  bankExpiry: string;
+  orders: Record<string, Fill>;
+};
+
+/** The build bundles this file twice (the Nitro plugin chunk and the SSR chunk the page calls).
+ *  Each copy has its own module state, so without this both started a desk in one process:
+ *  two Dhan logins, two feeds, two lock owners, and the page read the copy that was not trading.
+ *  The first copy to start registers here; every other copy only reads its snapshot. */
+const deskGlobal = globalThis as typeof globalThis & { __arthaDesk?: { snapshot: () => DeskSnap } };
+
+export function deskSnapshot(): DeskSnap {
+  const running = deskGlobal.__arthaDesk;
+  if (running && running.snapshot !== localSnapshot) return running.snapshot();
+  return localSnapshot();
+}
+
+function localSnapshot(): {
   owns: boolean;
   note: string;
   phase: DeskPhase;
@@ -92,9 +116,10 @@ export function deskSnapshot(): {
 }
 
 export function startDesk() {
-  if (started) return;
+  if (started || deskGlobal.__arthaDesk) return;
   const env = readDhanEnv();
   if (!env) return;
+  deskGlobal.__arthaDesk = { snapshot: localSnapshot };
   started = true;
   owns = true;
   note = "Lightsail owns the book. The feed wakes at 09:08 IST. Live orders start at 09:15.";
